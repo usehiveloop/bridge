@@ -1,0 +1,30 @@
+name: e2e-llm
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  real-e2e:
+    name: real-e2e
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || !github.event.pull_request.head.repo.fork
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: Swatinem/rust-cache@v2
+      - name: run real llm e2e tests
+        run: cargo test -p bridge-e2e --test real_e2e_tests -- --ignored --test-threads=1
