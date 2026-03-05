@@ -17,7 +17,7 @@ fn test_state() -> AppState {
     let mcp_manager = Arc::new(McpManager::new());
     let cancel = CancellationToken::new();
     let supervisor = Arc::new(AgentSupervisor::new(mcp_manager, cancel));
-    AppState::new(supervisor, "test-api-key".to_string())
+    AppState::new(supervisor, "test-api-key".to_string(), None)
 }
 
 /// Build the application router with the request-id middleware applied,
