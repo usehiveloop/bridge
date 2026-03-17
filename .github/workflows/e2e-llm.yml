@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+  COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
