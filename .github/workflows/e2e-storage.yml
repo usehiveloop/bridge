@@ -1,0 +1,29 @@
+name: e2e-storage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  test-storage-e2e:
+    name: test-storage-e2e
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || !github.event.pull_request.head.repo.fork
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: run storage e2e tests
+        env:
+          BRIDGE_STORAGE_URL: ${{ secrets.BRIDGE_STORAGE_URL }}
+          BRIDGE_STORAGE_AUTH_TOKEN: ${{ secrets.BRIDGE_STORAGE_AUTH_TOKEN }}
+        run: cargo test -p storage-e2e -- --test-threads=1
