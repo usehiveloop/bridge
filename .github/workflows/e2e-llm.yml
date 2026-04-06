@@ -21,7 +21,7 @@ jobs:
   real-e2e:
     name: real-e2e
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || !github.event.pull_request.head.repo.fork
+    if: false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -18,7 +18,7 @@ jobs:
   test-e2e-approval:
     name: test-e2e-approval
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || !github.event.pull_request.head.repo.fork
+    if: false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

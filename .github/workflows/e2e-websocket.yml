@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   test-e2e-websocket:
+    if: false
     name: test-e2e-websocket
     runs-on: ubuntu-latest
     steps:

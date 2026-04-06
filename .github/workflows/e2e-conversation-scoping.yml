@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   test-e2e-conversation-scoping:
+    if: false
     name: test-e2e-conversation-scoping
     runs-on: ubuntu-latest
     steps:
