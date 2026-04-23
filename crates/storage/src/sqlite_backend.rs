@@ -90,9 +90,8 @@ impl StorageBackend for SqliteBackend {
             .call(move |conn| {
                 let tx = conn.transaction()?;
                 {
-                    let mut stmt = tx.prepare(
-                        "SELECT conversation_id FROM conversations WHERE agent_id = ?1",
-                    )?;
+                    let mut stmt = tx
+                        .prepare("SELECT conversation_id FROM conversations WHERE agent_id = ?1")?;
                     let conv_ids: Vec<String> = stmt
                         .query_map(params![agent_id], |row| row.get(0))?
                         .filter_map(|r| r.ok())

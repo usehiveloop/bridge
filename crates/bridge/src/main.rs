@@ -247,9 +247,8 @@ async fn run_server() -> anyhow::Result<()> {
 
     let (webhook_tx, webhook_delivery_handle) = if config.webhook_url.is_some() {
         let webhook_config = config.webhook_config.clone().unwrap_or_default();
-        let (tx, rx) = tokio::sync::mpsc::channel(
-            webhooks::delivery::PER_CONVERSATION_CHANNEL_CAPACITY,
-        );
+        let (tx, rx) =
+            tokio::sync::mpsc::channel(webhooks::delivery::PER_CONVERSATION_CHANNEL_CAPACITY);
         let client = reqwest::Client::new();
         let url = webhook_url.clone();
         let secret = webhook_secret.clone();

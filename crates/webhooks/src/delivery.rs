@@ -148,7 +148,8 @@ fn route_event(
     };
 
     let (tx, worker_rx) = mpsc::channel(PER_CONVERSATION_CHANNEL_CAPACITY);
-    tx.try_send(event).expect("fresh channel cannot be full or closed");
+    tx.try_send(event)
+        .expect("fresh channel cannot be full or closed");
     workers.insert(conv_id.clone(), tx);
 
     let worker_client = client.clone();
