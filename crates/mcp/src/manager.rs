@@ -2,9 +2,16 @@ use bridge_core::mcp::McpServerDefinition;
 use bridge_core::BridgeError;
 use dashmap::DashMap;
 use std::sync::Arc;
-use tracing::{error, info};
+use tokio::sync::OnceCell;
+use tracing::{error, info, warn};
 
 use crate::connection::McpConnection;
+
+/// Lazy connection cell — shared across callers so concurrent
+/// `get_or_connect` calls for the same (agent, server) key cannot race
+/// into a double-spawn. The `OnceCell` guarantees exactly-once
+/// initialization.
+type ConnectionCell = Arc<OnceCell<Result<Arc<McpConnection>, String>>>;
 
 /// Manages MCP server connections for all agents.
 ///
@@ -13,6 +20,9 @@ use crate::connection::McpConnection;
 pub struct McpManager {
     /// Map of (agent_id, server_name) → McpConnection
     connections: DashMap<(String, String), Arc<McpConnection>>,
+    /// Map of (agent_id, server_name) → lazy connect cell (for dedup).
+    /// The cell's ok branch is mirrored into `connections` once filled.
+    spawning: DashMap<(String, String), ConnectionCell>,
 }
 
 impl McpManager {
@@ -20,6 +30,7 @@ impl McpManager {
     pub fn new() -> Self {
         Self {
             connections: DashMap::new(),
+            spawning: DashMap::new(),
         }
     }
 
@@ -34,7 +45,7 @@ impl McpManager {
         servers: &[McpServerDefinition],
     ) -> Result<(), BridgeError> {
         for server in servers {
-            match McpConnection::connect(&server.name, &server.transport).await {
+            match self.get_or_connect(agent_id, server).await {
                 Ok(conn) => {
                     info!(
                         agent_id = agent_id,
@@ -60,9 +71,6 @@ impl McpManager {
                             );
                         }
                     }
-
-                    let key = (agent_id.to_string(), server.name.clone());
-                    self.connections.insert(key, Arc::new(conn));
                 }
                 Err(e) => {
                     error!(
@@ -76,6 +84,59 @@ impl McpManager {
         }
 
         Ok(())
+    }
+
+    /// Get-or-spawn a connection atomically. Concurrent callers for the same
+    /// key all receive the same Arc<McpConnection> (or the same error) from
+    /// a single underlying spawn.
+    async fn get_or_connect(
+        &self,
+        agent_id: &str,
+        server: &McpServerDefinition,
+    ) -> Result<Arc<McpConnection>, BridgeError> {
+        let key = (agent_id.to_string(), server.name.clone());
+
+        // Fast path: already-connected and still alive.
+        if let Some(existing) = self.connections.get(&key) {
+            let c = existing.value().clone();
+            if c.is_alive() {
+                return Ok(c);
+            }
+        }
+
+        let cell: ConnectionCell = self
+            .spawning
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .value()
+            .clone();
+
+        let result = cell
+            .get_or_init(|| async {
+                McpConnection::connect(&server.name, &server.transport)
+                    .await
+                    .map(Arc::new)
+                    .map_err(|e| e.to_string())
+            })
+            .await;
+
+        match result {
+            Ok(conn) => {
+                self.connections.insert(key.clone(), conn.clone());
+                // Keep the cell around so future callers still hit the fast path,
+                // but also remove it to prevent unbounded growth when clients
+                // reconnect repeatedly. WHY: the connection is now in `connections`,
+                // the cell served its dedup purpose.
+                self.spawning.remove(&key);
+                Ok(conn.clone())
+            }
+            Err(e) => {
+                // Evict the failed cell so future callers retry instead of
+                // replaying the same cached failure forever.
+                self.spawning.remove(&key);
+                Err(BridgeError::McpError(e.clone()))
+            }
+        }
     }
 
     /// Disconnect all MCP servers for a given agent.
@@ -102,11 +163,40 @@ impl McpManager {
     }
 
     /// Get a connection to a specific MCP server for an agent.
-    pub fn get_connection(&self, agent_id: &str, server_name: &str) -> Option<Arc<McpConnection>> {
+    ///
+    /// If a stored connection has died (child process exited), it is
+    /// evicted and `Err(BridgeError::McpError("connection lost"))` is
+    /// returned so callers stop using a stale handle.
+    pub fn get_connection(
+        &self,
+        agent_id: &str,
+        server_name: &str,
+    ) -> Result<Arc<McpConnection>, BridgeError> {
         let key = (agent_id.to_string(), server_name.to_string());
-        self.connections
-            .get(&key)
-            .map(|entry| entry.value().clone())
+        let conn = match self.connections.get(&key) {
+            Some(entry) => entry.value().clone(),
+            None => {
+                return Err(BridgeError::McpError(format!(
+                    "no connection for agent '{}' server '{}'",
+                    agent_id, server_name
+                )));
+            }
+        };
+
+        if conn.is_alive() {
+            Ok(conn)
+        } else {
+            warn!(
+                agent_id = agent_id,
+                server = server_name,
+                "MCP connection lost; evicting stale handle"
+            );
+            self.connections.remove(&key);
+            Err(BridgeError::McpError(format!(
+                "connection lost for agent '{}' server '{}'",
+                agent_id, server_name
+            )))
+        }
     }
 
     /// Get all connections for a given agent.
@@ -147,9 +237,9 @@ mod tests {
     }
 
     #[test]
-    fn test_get_connection_returns_none_for_unknown() {
+    fn test_get_connection_returns_error_for_unknown() {
         let manager = McpManager::new();
-        assert!(manager.get_connection("agent1", "server1").is_none());
+        assert!(manager.get_connection("agent1", "server1").is_err());
     }
 
     #[test]
@@ -160,11 +250,11 @@ mod tests {
     }
 
     #[test]
-    fn test_get_connection_returns_none_for_wrong_agent() {
+    fn test_get_connection_returns_error_for_wrong_agent() {
         let manager = McpManager::new();
-        // No connections exist, so querying any agent/server pair returns None
-        assert!(manager.get_connection("agent1", "server_a").is_none());
-        assert!(manager.get_connection("agent2", "server_a").is_none());
+        // No connections exist, so querying any agent/server pair returns an error
+        assert!(manager.get_connection("agent1", "server_a").is_err());
+        assert!(manager.get_connection("agent2", "server_a").is_err());
     }
 
     #[test]
@@ -227,6 +317,36 @@ mod tests {
         }];
         // Should not panic; the server fails to connect but the manager handles it gracefully
         manager.connect_agent("agent1", &servers).await.unwrap();
+        assert_eq!(manager.connection_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_oncecell_dedup_concurrent_failures_only_spawn_once() {
+        // WHY: the key safety property is that concurrent get_or_connect
+        // calls for the same (agent, server) all see the same underlying
+        // spawn result, rather than each launching their own subprocess.
+        let manager = Arc::new(McpManager::new());
+        let def = McpServerDefinition {
+            name: "dedup_server".to_string(),
+            transport: bridge_core::mcp::McpTransport::Stdio {
+                command: "/nonexistent/binary/for/dedup".to_string(),
+                args: vec![],
+                env: std::collections::HashMap::new(),
+            },
+        };
+
+        let mut handles = vec![];
+        for _ in 0..8 {
+            let m = manager.clone();
+            let d = def.clone();
+            handles.push(tokio::spawn(async move {
+                m.get_or_connect("agent1", &d).await
+            }));
+        }
+        for h in handles {
+            let r = h.await.unwrap();
+            assert!(r.is_err());
+        }
         assert_eq!(manager.connection_count(), 0);
     }
 }

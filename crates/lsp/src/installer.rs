@@ -4,8 +4,11 @@
 //! Runs asynchronously in the background when bridge starts with --install-lsp-servers.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Stdio;
 use tracing::{debug, info, warn};
+
+use crate::installer_checksums;
 
 /// Installation method for an LSP server.
 ///
@@ -27,6 +30,19 @@ pub enum InstallMethod {
     Pip { package: String },
     /// Custom install command (usually a curl/wget + unpack script).
     Custom { command: String, args: Vec<String> },
+    /// Download a pinned URL, verify its SHA256 against
+    /// [`installer_checksums::CHECKSUMS`], then hand off to a shell command
+    /// that extracts/installs the downloaded file.
+    ///
+    /// The downloaded path is exposed to the command through the
+    /// `BRIDGE_LSP_DL` environment variable (not as an argv slot) so the
+    /// shell snippet cannot be tricked into injecting it as a flag.
+    DownloadAndRun {
+        url: String,
+        /// Shell snippet to run with `bash -c`. Receives the downloaded
+        /// file path as `$BRIDGE_LSP_DL`.
+        shell: String,
+    },
 }
 
 /// Information about an installable LSP server
@@ -70,20 +86,15 @@ pub fn installable_servers() -> Vec<InstallableServer> {
             binaries: vec!["biome".to_string()],
             description: "Biome LSP server for JS/TS/JSON/CSS".to_string(),
         },
-        // Deno — the LSP is built into the `deno` CLI (`deno lsp`). The official
-        // install script honors DENO_INSTALL as a prefix, so the binary lands
-        // at ~/.local/bin/deno to match the other self-contained downloads.
+        // Deno — pinned to a specific release tarball so the bytes we install
+        // are hash-verifiable.
         InstallableServer {
             id: "deno".to_string(),
-            method: InstallMethod::Custom {
-                command: "bash".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "set -eu; mkdir -p \"$HOME/.local/bin\"; \
-                     DENO_INSTALL=\"$HOME/.local\" \
-                     curl -fsSL https://deno.land/install.sh | sh"
-                        .to_string(),
-                ],
+            method: InstallMethod::DownloadAndRun {
+                url: "https://github.com/denoland/deno/releases/download/v2.0.6/deno-x86_64-unknown-linux-gnu.zip".to_string(),
+                shell: "set -eu; mkdir -p \"$HOME/.local/bin\"; \
+                        unzip -q -o \"$BRIDGE_LSP_DL\" -d \"$HOME/.local/bin\"; \
+                        chmod +x \"$HOME/.local/bin/deno\"".to_string(),
             },
             binaries: vec!["deno".to_string()],
             description: "Deno language server (built into the Deno CLI)".to_string(),
@@ -113,20 +124,16 @@ pub fn installable_servers() -> Vec<InstallableServer> {
             binaries: vec!["astro-ls".to_string()],
             description: "Astro language server".to_string(),
         },
-        // Rust — download the prebuilt rust-analyzer binary. `cargo install`
+        // Rust — pinned rust-analyzer 2025-10-27 prebuilt binary. `cargo install`
         // builds from source and takes ~10 minutes; the release binary is a
         // few-megabyte download.
         InstallableServer {
             id: "rust".to_string(),
-            method: InstallMethod::Custom {
-                command: "bash".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "set -eu; mkdir -p ~/.local/bin; \
-                     curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz \
-                       | gunzip > ~/.local/bin/rust-analyzer; \
-                     chmod +x ~/.local/bin/rust-analyzer".to_string(),
-                ],
+            method: InstallMethod::DownloadAndRun {
+                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2025-10-27/rust-analyzer-x86_64-unknown-linux-gnu.gz".to_string(),
+                shell: "set -eu; mkdir -p ~/.local/bin; \
+                        gunzip -c \"$BRIDGE_LSP_DL\" > ~/.local/bin/rust-analyzer; \
+                        chmod +x ~/.local/bin/rust-analyzer".to_string(),
             },
             binaries: vec!["rust-analyzer".to_string()],
             description: "Rust analyzer".to_string(),
@@ -167,19 +174,14 @@ pub fn installable_servers() -> Vec<InstallableServer> {
             binaries: vec!["bash-language-server".to_string()],
             description: "Bash language server".to_string(),
         },
-        // Java/Kotlin — Eclipse JDT ships a platform-neutral tarball.
+        // Java/Kotlin — Eclipse JDT pinned to a specific dated snapshot.
         InstallableServer {
             id: "jdtls".to_string(),
-            method: InstallMethod::Custom {
-                command: "bash".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "set -eu; mkdir -p ~/.local/share/jdtls ~/.local/bin; \
-                     wget -qO /tmp/jdtls.tar.gz https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz; \
-                     tar -xzf /tmp/jdtls.tar.gz -C ~/.local/share/jdtls; \
-                     ln -sf ~/.local/share/jdtls/bin/jdtls ~/.local/bin/jdtls; \
-                     rm -f /tmp/jdtls.tar.gz".to_string(),
-                ],
+            method: InstallMethod::DownloadAndRun {
+                url: "https://download.eclipse.org/jdtls/snapshots/jdt-language-server-1.45.0-202511062216.tar.gz".to_string(),
+                shell: "set -eu; mkdir -p ~/.local/share/jdtls ~/.local/bin; \
+                        tar -xzf \"$BRIDGE_LSP_DL\" -C ~/.local/share/jdtls; \
+                        ln -sf ~/.local/share/jdtls/bin/jdtls ~/.local/bin/jdtls".to_string(),
             },
             binaries: vec!["jdtls".to_string()],
             description: "Eclipse JDT Language Server".to_string(),
@@ -203,41 +205,26 @@ pub fn installable_servers() -> Vec<InstallableServer> {
             binaries: vec!["clangd".to_string()],
             description: "Clangd C/C++ language server".to_string(),
         },
-        // Zig
+        // Zig — pinned zls 0.14.0 Linux x86_64 tarball.
         InstallableServer {
             id: "zig".to_string(),
-            method: InstallMethod::Custom {
-                command: "bash".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "set -eu; mkdir -p ~/.local/share/zls ~/.local/bin; \
-                     wget -qO /tmp/zls.tar.gz https://github.com/zigtools/zls/releases/latest/download/zls-linux-x86_64.tar.gz; \
-                     tar -xzf /tmp/zls.tar.gz -C ~/.local/share/zls; \
-                     ln -sf ~/.local/share/zls/zls ~/.local/bin/zls; \
-                     rm -f /tmp/zls.tar.gz".to_string(),
-                ],
+            method: InstallMethod::DownloadAndRun {
+                url: "https://github.com/zigtools/zls/releases/download/0.14.0/zls-linux-x86_64.tar.gz".to_string(),
+                shell: "set -eu; mkdir -p ~/.local/share/zls ~/.local/bin; \
+                        tar -xzf \"$BRIDGE_LSP_DL\" -C ~/.local/share/zls; \
+                        ln -sf ~/.local/share/zls/zls ~/.local/bin/zls".to_string(),
             },
             binaries: vec!["zls".to_string()],
             description: "Zig language server".to_string(),
         },
-        // Terraform
+        // Terraform — pinned 0.39.0 to avoid the floating GitHub API lookup.
         InstallableServer {
             id: "terraform".to_string(),
-            method: InstallMethod::Custom {
-                command: "bash".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    // HashiCorp's /latest/ URL doesn't give the version directly,
-                    // so resolve it via the GitHub releases API.
-                    "set -eu; \
-                     version=$(curl -fsSL https://api.github.com/repos/hashicorp/terraform-ls/releases/latest | sed -n 's/.*\"tag_name\": *\"v\\{0,1\\}\\([^\"]*\\)\".*/\\1/p'); \
-                     [ -n \"$version\" ] || { echo 'could not resolve terraform-ls version' >&2; exit 1; }; \
-                     mkdir -p ~/.local/bin; \
-                     wget -qO /tmp/terraform-ls.zip \"https://releases.hashicorp.com/terraform-ls/${version}/terraform-ls_${version}_linux_amd64.zip\"; \
-                     unzip -q -o /tmp/terraform-ls.zip -d ~/.local/bin/; \
-                     chmod +x ~/.local/bin/terraform-ls; \
-                     rm -f /tmp/terraform-ls.zip".to_string(),
-                ],
+            method: InstallMethod::DownloadAndRun {
+                url: "https://releases.hashicorp.com/terraform-ls/0.39.0/terraform-ls_0.39.0_linux_amd64.zip".to_string(),
+                shell: "set -eu; mkdir -p ~/.local/bin; \
+                        unzip -q -o \"$BRIDGE_LSP_DL\" -d ~/.local/bin/; \
+                        chmod +x ~/.local/bin/terraform-ls".to_string(),
             },
             binaries: vec!["terraform-ls".to_string()],
             description: "Terraform language server".to_string(),
@@ -278,28 +265,27 @@ pub fn installable_servers() -> Vec<InstallableServer> {
             binaries: vec!["elm-language-server".to_string()],
             description: "Elm language server".to_string(),
         },
-        // Elixir
+        // Elixir — pinned to 0.23.1.
         InstallableServer {
             id: "elixir-ls".to_string(),
-            method: InstallMethod::Custom {
-                command: "bash".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "cd /tmp && wget -q https://github.com/elixir-lsp/elixir-ls/releases/latest/download/elixir-ls.zip -O elixir-ls.zip && mkdir -p ~/.local/share/elixir-ls && unzip -q elixir-ls.zip -d ~/.local/share/elixir-ls && chmod +x ~/.local/share/elixir-ls/language_server.sh && ln -sf ~/.local/share/elixir-ls/language_server.sh ~/.local/bin/language_server.sh".to_string(),
-                ],
+            method: InstallMethod::DownloadAndRun {
+                url: "https://github.com/elixir-lsp/elixir-ls/releases/download/v0.23.1/elixir-ls-v0.23.1.zip".to_string(),
+                shell: "set -eu; mkdir -p ~/.local/share/elixir-ls ~/.local/bin; \
+                        unzip -q -o \"$BRIDGE_LSP_DL\" -d ~/.local/share/elixir-ls; \
+                        chmod +x ~/.local/share/elixir-ls/language_server.sh; \
+                        ln -sf ~/.local/share/elixir-ls/language_server.sh ~/.local/bin/language_server.sh".to_string(),
             },
             binaries: vec!["language_server.sh".to_string()],
             description: "Elixir language server".to_string(),
         },
-        // Clojure
+        // Clojure — pinned to 2025.10.24 native build.
         InstallableServer {
             id: "clojure-lsp".to_string(),
-            method: InstallMethod::Custom {
-                command: "bash".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "cd /tmp && curl -sLO https://github.com/clojure-lsp/clojure-lsp/releases/latest/download/clojure-lsp-linux-amd64.zip && unzip -q clojure-lsp-linux-amd64.zip -d ~/.local/bin/ && chmod +x ~/.local/bin/clojure-lsp".to_string(),
-                ],
+            method: InstallMethod::DownloadAndRun {
+                url: "https://github.com/clojure-lsp/clojure-lsp/releases/download/2025.10.24-15.44.27/clojure-lsp-native-linux-amd64.zip".to_string(),
+                shell: "set -eu; mkdir -p ~/.local/bin; \
+                        unzip -q -o \"$BRIDGE_LSP_DL\" -d ~/.local/bin/; \
+                        chmod +x ~/.local/bin/clojure-lsp".to_string(),
             },
             binaries: vec!["clojure-lsp".to_string()],
             description: "Clojure language server".to_string(),
@@ -436,6 +422,9 @@ impl LspInstaller {
             InstallMethod::Go { path } => self.install_go(path).await,
             InstallMethod::Pip { package } => self.install_pip(package).await,
             InstallMethod::Custom { command, args } => self.install_custom(command, args).await,
+            InstallMethod::DownloadAndRun { url, shell } => {
+                self.install_download_and_run(url, shell).await
+            }
         };
 
         match result {
@@ -564,8 +553,14 @@ impl LspInstaller {
         .await
     }
 
-    /// Run custom install command
+    /// Run custom install command.
+    ///
+    /// The `command` string itself is validated to reject shell metacharacters —
+    /// args are passed to `Command::args()` so they're safe by construction,
+    /// but letting an attacker squirrel a `;` or `$(...)` into the *program*
+    /// name would allow escaping out of the exec path.
     async fn install_custom(&self, command: &str, args: &[String]) -> Result<(), String> {
+        validate_command_name(command)?;
         debug!(command = %command, args = ?args, "running custom install");
         let status = tokio::process::Command::new(command)
             .args(args)
@@ -581,6 +576,100 @@ impl LspInstaller {
             Err(format!("custom install command failed: {}", command))
         }
     }
+
+    /// Download a pinned URL to a scratch file, verify its SHA256 against the
+    /// pinned checksum registry, then exec the provided shell snippet with
+    /// `$BRIDGE_LSP_DL` set to the downloaded path.
+    async fn install_download_and_run(&self, url: &str, shell: &str) -> Result<(), String> {
+        debug!(url = %url, "downloading pinned LSP binary");
+        let client = reqwest::Client::builder()
+            .build()
+            .map_err(|e| format!("reqwest client init: {}", e))?;
+        let resp = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("download failed for {}: {}", url, e))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "download failed for {}: HTTP {}",
+                url,
+                resp.status()
+            ));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("read body for {}: {}", url, e))?;
+
+        // Verify checksum. Known hash → must match. "TODO" / unknown URL →
+        // logged warning inside `verify`, then Ok.
+        installer_checksums::verify(url, &bytes)?;
+
+        // Write to a unique temp path so concurrent installs don't collide.
+        let tmp_path: PathBuf = std::env::temp_dir().join(format!(
+            "bridge-lsp-dl-{}",
+            uuid_like_scratch_name(url)
+        ));
+        tokio::fs::write(&tmp_path, &bytes)
+            .await
+            .map_err(|e| format!("write {}: {}", tmp_path.display(), e))?;
+
+        let output = tokio::process::Command::new("bash")
+            .args(["-c", shell])
+            .env("BRIDGE_LSP_DL", &tmp_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| format!("bash spawn failed: {}", e))?;
+
+        // Best-effort cleanup — leaving the scratch file around on failure is
+        // fine, the temp dir gets cleared on reboot.
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!(
+                "install shell failed for {}: {}",
+                url,
+                stderr.trim()
+            ))
+        }
+    }
+}
+
+/// Reject command strings that contain shell metacharacters that could break
+/// out of the exec contract. Arg values are safe because `Command::args` does
+/// not shell-interpret, but the `command` is passed directly to `execvp`
+/// only on the assumption it's a plain program name.
+fn validate_command_name(command: &str) -> Result<(), String> {
+    const FORBIDDEN: &[&str] = &[";", "|", "&", "`", "$(", "\n", "\r", "\0", "<", ">"];
+    for pat in FORBIDDEN {
+        if command.contains(pat) {
+            return Err(format!(
+                "install command contains forbidden metacharacter '{}': {:?}",
+                pat, command
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Derive a deterministic scratch-file name from a URL without pulling in a
+/// uuid dep. Collisions are irrelevant — we just need uniqueness per URL.
+fn uuid_like_scratch_name(url: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(url.as_bytes());
+    let d = h.finalize();
+    let mut s = String::with_capacity(16);
+    for b in &d[..8] {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
 }
 
 impl Default for LspInstaller {
@@ -612,6 +701,50 @@ mod tests {
         let available = installer.available_servers();
         assert!(!available.is_empty(), "should have available servers");
         assert!(available.contains(&"typescript".to_string()));
+    }
+
+    #[test]
+    fn test_validate_command_name_accepts_plain_binary() {
+        assert!(validate_command_name("bash").is_ok());
+        assert!(validate_command_name("/usr/bin/env").is_ok());
+        assert!(validate_command_name("npm").is_ok());
+    }
+
+    #[test]
+    fn test_validate_command_name_rejects_metacharacters() {
+        for bad in &[
+            "bash;whoami",
+            "bash|cat",
+            "bash&echo",
+            "bash`id`",
+            "bash$(id)",
+            "bash\nwhoami",
+            "bash\0",
+            "bash<etc",
+            "bash>out",
+        ] {
+            assert!(
+                validate_command_name(bad).is_err(),
+                "expected rejection for {:?}",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_download_methods_have_pinned_checksums_or_todo() {
+        // Every DownloadAndRun URL must resolve in the checksum registry,
+        // even if the entry is still TODO. Prevents silent downgrade to the
+        // "no pinned checksum" warn path.
+        for server in installable_servers() {
+            if let InstallMethod::DownloadAndRun { url, .. } = &server.method {
+                assert!(
+                    crate::installer_checksums::lookup(url).is_some(),
+                    "URL {} is pinned in installer but missing from CHECKSUMS",
+                    url
+                );
+            }
+        }
     }
 
     #[test]

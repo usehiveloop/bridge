@@ -997,6 +997,8 @@ mod serde_roundtrip_tests {
             standalone_agent: false,
             otel_endpoint: None,
             otel_service_name: "bridge".to_string(),
+            sandbox_enabled: true,
+            allowed_paths: Vec::new(),
         };
 
         let json = serde_json::to_string_pretty(&config).expect("serialize RuntimeConfig");

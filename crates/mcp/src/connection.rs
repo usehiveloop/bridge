@@ -4,6 +4,7 @@ use rmcp::service::{Peer, RoleClient, RunningService};
 use rmcp::ServiceExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// Information about a tool discovered from an MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,9 +18,14 @@ pub struct McpToolInfo {
 }
 
 /// A connection to a single MCP server.
+///
+/// For stdio transports we also capture the child PID so we can (a) check
+/// liveness without re-reading the transport, and (b) SIGKILL the subprocess
+/// on disconnect if it ignores the graceful cancel.
 pub struct McpConnection {
     running: RunningService<RoleClient, ()>,
     server_name: String,
+    child_pid: Option<u32>,
 }
 
 impl McpConnection {
@@ -44,6 +50,9 @@ impl McpConnection {
                 BridgeError::McpError(format!("failed to spawn MCP server '{}': {}", command, e))
             })?;
 
+        // Capture the child PID before the transport is consumed by serve().
+        let child_pid = transport.id();
+
         let running = ().serve(transport).await.map_err(|e| {
             BridgeError::McpError(format!(
                 "failed to initialize MCP connection '{}': {}",
@@ -54,6 +63,7 @@ impl McpConnection {
         Ok(Self {
             running,
             server_name: server_name.to_string(),
+            child_pid,
         })
     }
 
@@ -92,6 +102,7 @@ impl McpConnection {
         Ok(Self {
             running,
             server_name: server_name.to_string(),
+            child_pid: None,
         })
     }
 
@@ -170,12 +181,81 @@ impl McpConnection {
         &self.server_name
     }
 
-    /// Disconnect from the MCP server.
+    /// Check whether the underlying MCP server process is still alive.
+    ///
+    /// For stdio transports with a known child PID we send signal 0 (a no-op
+    /// signal used purely to probe for existence). For HTTP transports where
+    /// there is no local child we report `true` — the health of a remote
+    /// endpoint is the caller's problem to diagnose.
+    pub fn is_alive(&self) -> bool {
+        match self.child_pid {
+            Some(pid) => pid_alive(pid),
+            None => true,
+        }
+    }
+
+    /// Disconnect from the MCP server: cancel the running service, wait up to
+    /// 5 s for a graceful exit, then SIGKILL the child if it's still alive.
     pub async fn disconnect(self) {
         let ct = self.running.cancellation_token();
         ct.cancel();
+
+        let pid = self.child_pid;
+        drop(self.running);
+
+        if let Some(pid) = pid {
+            let deadline = Duration::from_secs(5);
+            let poll = Duration::from_millis(100);
+            let start = tokio::time::Instant::now();
+            while start.elapsed() < deadline {
+                if !pid_alive(pid) {
+                    return;
+                }
+                tokio::time::sleep(poll).await;
+            }
+            // Still alive after 5 s — force kill. WHY: rmcp's Drop impl uses a
+            // best-effort kill on a spawned task that we can't await, so we
+            // send SIGKILL directly to guarantee the subprocess is reaped.
+            force_kill(pid);
+        }
     }
 }
+
+/// Best-effort liveness probe. True if the process exists, false if it's gone
+/// or if we lack permission to signal it (which shouldn't happen for our own
+/// children, so treating "EPERM" as dead is wrong — fall through to true).
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    // signal 0 probes for process existence without sending a signal.
+    let pid = pid as libc::pid_t;
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    // Errno ESRCH (3) = no such process. Anything else — treat as alive to
+    // avoid spurious "connection lost" on transient EPERM.
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    errno != libc::ESRCH
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_pid: u32) -> bool {
+    // WHY: Non-Unix platforms aren't a supported deployment target for the
+    // stdio transport; assume alive so the manager doesn't spuriously drop
+    // connections.
+    true
+}
+
+#[cfg(unix)]
+fn force_kill(pid: u32) {
+    let pid = pid as libc::pid_t;
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn force_kill(_pid: u32) {}
 
 #[cfg(test)]
 mod tests {
@@ -311,5 +391,20 @@ mod tests {
             }
             Ok(_) => panic!("Expected error"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pid_alive_self() {
+        // Our own PID must be alive.
+        let my_pid = std::process::id();
+        assert!(pid_alive(my_pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pid_alive_nonexistent() {
+        // PID 0x7fffffff is practically never a valid process; ESRCH expected.
+        assert!(!pid_alive(i32::MAX as u32));
     }
 }

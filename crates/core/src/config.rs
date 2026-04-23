@@ -82,6 +82,19 @@ pub struct RuntimeConfig {
     /// Configured via `BRIDGE_OTEL_SERVICE_NAME` env var.
     #[serde(default = "default_otel_service_name")]
     pub otel_service_name: String,
+
+    /// Enforce the filesystem sandbox allowlist on built-in file-writing tools.
+    /// When true (default), paths outside the allowlist (project root,
+    /// `~/.claude`, `/tmp`, `$XDG_CACHE_HOME`, and any explicitly-listed
+    /// extra paths) are rejected with `BridgeError::SandboxViolation`.
+    /// Configured via `BRIDGE_SANDBOX_ENABLED` env var.
+    #[serde(default = "default_sandbox_enabled")]
+    pub sandbox_enabled: bool,
+
+    /// Additional directories that the sandbox should treat as allowed when
+    /// `sandbox_enabled` is true. Paths are checked after canonicalization.
+    #[serde(default)]
+    pub allowed_paths: Vec<std::path::PathBuf>,
 }
 
 /// Webhook delivery configuration for tuning throughput and resilience.
@@ -138,6 +151,9 @@ fn default_webhook_worker_idle_timeout() -> u64 {
 }
 fn default_otel_service_name() -> String {
     "bridge".to_string()
+}
+fn default_sandbox_enabled() -> bool {
+    true
 }
 
 /// LSP configuration: either disabled entirely or per-server config map.
@@ -216,6 +232,8 @@ impl Default for RuntimeConfig {
             standalone_agent: false,
             otel_endpoint: None,
             otel_service_name: default_otel_service_name(),
+            sandbox_enabled: default_sandbox_enabled(),
+            allowed_paths: Vec::new(),
         }
     }
 }

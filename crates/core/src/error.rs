@@ -59,6 +59,13 @@ pub enum BridgeError {
     /// Capacity exhausted (max conversations, task budget, etc.)
     #[error("capacity exhausted: {0}")]
     CapacityExhausted(String),
+
+    /// Sandbox denied a filesystem access outside the allowlist.
+    #[error("sandbox violation: '{path}' is outside the allowlist ({})", allowlist.join(", "))]
+    SandboxViolation {
+        path: String,
+        allowlist: Vec<String>,
+    },
 }
 
 /// Convenience Result type alias for bridge operations.
@@ -85,6 +92,7 @@ impl IntoResponse for BridgeError {
             BridgeError::CapacityExhausted(_) => {
                 (StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted")
             }
+            BridgeError::SandboxViolation { .. } => (StatusCode::FORBIDDEN, "sandbox_violation"),
         };
 
         let body = serde_json::json!({

@@ -1,6 +1,7 @@
 pub mod config;
 pub mod error;
 pub mod installer;
+pub mod installer_checksums;
 pub mod language;
 pub mod manager;
 pub mod server;
