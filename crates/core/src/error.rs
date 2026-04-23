@@ -82,9 +82,7 @@ fn bearer_regex() -> &'static Regex {
 
 fn api_key_regex() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        Regex::new(r#"(?i)api[_-]?key["']?\s*[:=]\s*["']?\S+"#).unwrap()
-    })
+    R.get_or_init(|| Regex::new(r#"(?i)api[_-]?key["']?\s*[:=]\s*["']?\S+"#).unwrap())
 }
 
 /// Redact common secret patterns and truncate to `SANITIZE_MAX_BYTES`
