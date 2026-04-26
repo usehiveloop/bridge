@@ -26,4 +26,4 @@ jobs:
         with:
           node-version: "20"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p bridge-e2e --test observability_e2e_tests -- --ignored --test-threads=1
+      - run: cargo test -p bridge-e2e --test observability_e2e_a_tests --test observability_e2e_b_tests -- --ignored --test-threads=1

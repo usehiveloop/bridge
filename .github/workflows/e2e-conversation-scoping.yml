@@ -25,4 +25,4 @@ jobs:
         with:
           node-version: "20"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p bridge-e2e --test conversation_scoping_e2e_tests -- --test-threads=1
+      - run: cargo test -p bridge-e2e --test conversation_scoping_e2e_a_tests --test conversation_scoping_e2e_b_tests -- --test-threads=1
