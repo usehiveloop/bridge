@@ -24,9 +24,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 : "${ANTHROPIC_BASE_URL:=https://token-plan-sgp.xiaomimimo.com/anthropic}"
-: "${ANTHROPIC_AUTH_TOKEN:=***REMOVED***}"
 : "${ANTHROPIC_MODEL:=mimo-v2.5-pro}"
 : "${BRIDGE_BASE_URL:=http://127.0.0.1:8080}"
+
+if [[ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
+    echo "✗ ANTHROPIC_AUTH_TOKEN is required (the upstream proxy/Anthropic key)" >&2
+    exit 2
+fi
 
 CTRL_KEY="test-control-plane-key"
 IMAGE_TAG="bridge-e2e:latest"
@@ -308,21 +312,21 @@ echo "═══ Phase 4: custom MCP (hiveloop memory) ═══"
 docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 start_container "bypassPermissions"
 
-HIVELOOP_MCP=$(cat <<'JSON'
-[
-  {
-    "name": "hiveloop",
-    "transport": {
-      "type": "streamable_http",
-      "url": "https://mcp.usehiveloop.com/292b4d0a-0f4f-47fe-b7a4-cb479b465c92",
-      "headers": {
-        "Authorization": "Bearer ***REMOVED***"
-      }
-    }
-  }
-]
-JSON
-)
+if [[ -z "${HIVELOOP_MCP_URL:-}" || -z "${HIVELOOP_MCP_TOKEN:-}" ]]; then
+    echo "✗ HIVELOOP_MCP_URL and HIVELOOP_MCP_TOKEN are required for Phase 4" >&2
+    exit 2
+fi
+HIVELOOP_MCP=$(python3 -c "
+import json, os
+print(json.dumps([{
+    'name': 'hiveloop',
+    'transport': {
+        'type': 'streamable_http',
+        'url': os.environ['HIVELOOP_MCP_URL'],
+        'headers': {'Authorization': f\"Bearer {os.environ['HIVELOOP_MCP_TOKEN']}\"},
+    },
+}]))
+")
 push_agent "bypassPermissions" "${HIVELOOP_MCP}"
 
 # Phase 4a — retain

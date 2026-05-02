@@ -303,21 +303,21 @@ echo "═══ Phase 4: custom MCP (hiveloop memory) ═══"
 docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 start_container
 
-HIVELOOP_MCP=$(cat <<'JSON'
-[
-  {
-    "name": "hiveloop",
-    "transport": {
-      "type": "streamable_http",
-      "url": "https://mcp.usehiveloop.com/292b4d0a-0f4f-47fe-b7a4-cb479b465c92",
-      "headers": {
-        "Authorization": "Bearer ***REMOVED***"
-      }
-    }
-  }
-]
-JSON
-)
+if [[ -z "${HIVELOOP_MCP_URL:-}" || -z "${HIVELOOP_MCP_TOKEN:-}" ]]; then
+    echo "✗ HIVELOOP_MCP_URL and HIVELOOP_MCP_TOKEN are required for Phase 4" >&2
+    exit 2
+fi
+HIVELOOP_MCP=$(python3 -c "
+import json, os
+print(json.dumps([{
+    'name': 'hiveloop',
+    'transport': {
+        'type': 'streamable_http',
+        'url': os.environ['HIVELOOP_MCP_URL'],
+        'headers': {'Authorization': f\"Bearer {os.environ['HIVELOOP_MCP_TOKEN']}\"},
+    },
+}]))
+")
 push_agent "bypassPermissions" "${HIVELOOP_MCP}"
 
 # Phase 4a — retain
