@@ -144,7 +144,6 @@ async fn pipe_stderr(stderr: tokio::process::ChildStderr) {
 
 struct SessionState {
     session_id: SessionId,
-    sse_tx: mpsc::Sender<BridgeEvent>,
 }
 
 enum Cmd {
@@ -173,7 +172,7 @@ pub struct ClaudeHarness {
     agent_def: AgentDefStore,
     cmd_tx: mpsc::Sender<Cmd>,
     sessions: Arc<DashMap<String, SessionState>>,
-    cwd: PathBuf,
+    event_bus: Arc<EventBus>,
     _driver: JoinHandle<()>,
     _child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
 }
@@ -198,7 +197,6 @@ impl ClaudeHarness {
         let agent_id_for_prompt = agent_id.clone();
         let sessions_for_notif = sessions.clone();
         let sessions_for_perm = sessions.clone();
-        let sessions_for_prompt = sessions.clone();
         let event_bus_for_notif = event_bus.clone();
         let event_bus_for_perm = event_bus.clone();
         let event_bus_for_prompt = event_bus.clone();
@@ -293,36 +291,27 @@ impl ClaudeHarness {
                                     let send = cx.send_request(req);
                                     let agent_id = agent_id_for_prompt.clone();
                                     let event_bus = event_bus_for_prompt.clone();
-                                    let sessions = sessions_for_prompt.clone();
                                     let conv_id = session_id.0.to_string();
                                     tokio::spawn(async move {
                                         match send.block_task().await {
                                             Ok(resp) => {
                                                 let stop = format!("{:?}", resp.stop_reason)
                                                     .to_ascii_lowercase();
-                                                let ev = BridgeEvent::new(
+                                                event_bus.emit(BridgeEvent::new(
                                                     BridgeEventType::TurnCompleted,
                                                     &agent_id,
                                                     &conv_id,
                                                     json!({ "stop_reason": stop }),
-                                                );
-                                                event_bus.emit(ev.clone());
-                                                if let Some(state) = sessions.get(&conv_id) {
-                                                    let _ = state.sse_tx.send(ev).await;
-                                                }
+                                                ));
                                             }
                                             Err(e) => {
                                                 warn!(error = %e, "prompt failed");
-                                                let ev = BridgeEvent::new(
+                                                event_bus.emit(BridgeEvent::new(
                                                     BridgeEventType::AgentError,
                                                     &agent_id,
                                                     &conv_id,
                                                     json!({ "error": e.to_string() }),
-                                                );
-                                                event_bus.emit(ev.clone());
-                                                if let Some(state) = sessions.get(&conv_id) {
-                                                    let _ = state.sse_tx.send(ev).await;
-                                                }
+                                                ));
                                             }
                                         }
                                     });
@@ -349,7 +338,7 @@ impl ClaudeHarness {
             agent_def,
             cmd_tx,
             sessions,
-            cwd,
+            event_bus,
             _driver: driver,
             _child: Arc::new(tokio::sync::Mutex::new(child)),
         })
@@ -381,12 +370,16 @@ impl ClaudeHarness {
             .map_err(|_| BridgeError::HarnessError("session creation cancelled".into()))?
             .map_err(BridgeError::HarnessError)?;
 
-        let (sse_tx, sse_rx) = mpsc::channel(256);
+        // Register an SSE stream on the EventBus. The bus stamps a global
+        // monotonic sequence_number on every event before fan-out, so the
+        // receiver we hand back already sees properly-ordered events.
+        let sse_rx = self
+            .event_bus
+            .register_sse_stream(session_id.0.to_string(), 256);
         self.sessions.insert(
             session_id.0.to_string(),
             SessionState {
                 session_id: session_id.clone(),
-                sse_tx,
             },
         );
 
@@ -446,33 +439,34 @@ impl ClaudeHarness {
 
     pub async fn end(&self, conversation_id: &str) {
         self.sessions.remove(conversation_id);
+        self.event_bus.remove_sse_stream(conversation_id);
     }
 
     pub async fn shutdown(&self) {
+        for entry in self.sessions.iter() {
+            self.event_bus.remove_sse_stream(entry.key());
+        }
         self.sessions.clear();
     }
 }
 
 async fn handle_notification(
     agent_id: &str,
-    sessions: &DashMap<String, SessionState>,
+    _sessions: &DashMap<String, SessionState>,
     event_bus: &EventBus,
     notification: SessionNotification,
 ) {
     let conv_id = notification.session_id.0.to_string();
     let events = events::map_update(agent_id, &conv_id, &notification.update);
     for ev in events {
-        event_bus.emit(ev.clone());
-        if let Some(state) = sessions.get(&conv_id) {
-            let _ = state.sse_tx.send(ev).await;
-        }
+        event_bus.emit(ev);
     }
 }
 
 async fn handle_permission(
     perm: Arc<PermissionManager>,
     event_bus: Arc<EventBus>,
-    sessions: &DashMap<String, SessionState>,
+    _sessions: &DashMap<String, SessionState>,
     agent_id: &str,
     req: RequestPermissionRequest,
     responder: Responder<RequestPermissionResponse>,
@@ -505,29 +499,10 @@ async fn handle_permission(
         .unwrap_or(Value::Null);
     let tool_call_id = req.tool_call.tool_call_id.0.to_string();
 
-    if let Some(state) = sessions.get(&conv_id) {
-        let _ = state
-            .sse_tx
-            .send(BridgeEvent::new(
-                BridgeEventType::ToolApprovalRequired,
-                agent_id,
-                &conv_id,
-                json!({
-                    "tool_call_id": tool_call_id,
-                    "tool_name": tool_name,
-                    "arguments": arguments.clone(),
-                    "options": req.options.iter().map(|o| {
-                        json!({
-                            "option_id": o.option_id.0.as_ref(),
-                            "name": o.name,
-                            "kind": format!("{:?}", o.kind).to_ascii_lowercase(),
-                        })
-                    }).collect::<Vec<_>>(),
-                }),
-            ))
-            .await;
-    }
-
+    // PermissionManager.request_approval emits ToolApprovalRequired to the
+    // EventBus and blocks waiting for /approvals to resolve; resolve() then
+    // emits ToolApprovalResolved. Both events fan out to the SSE channel
+    // registered on the EventBus for this conversation.
     let result = perm
         .request_approval(
             agent_id,
@@ -541,41 +516,21 @@ async fn handle_permission(
         )
         .await;
 
-    let (outcome, decision_str) = match &result {
+    let outcome = match &result {
         Ok((bridge_core::ApprovalDecision::Approve, _)) => match &allow_id {
-            Some(id) => (
-                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id.clone())),
-                "approve",
-            ),
-            None => (RequestPermissionOutcome::Cancelled, "cancelled"),
+            Some(id) => {
+                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id.clone()))
+            }
+            None => RequestPermissionOutcome::Cancelled,
         },
         Ok((bridge_core::ApprovalDecision::Deny, _)) => match &reject_id {
-            Some(id) => (
-                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id.clone())),
-                "deny",
-            ),
-            None => (RequestPermissionOutcome::Cancelled, "cancelled"),
+            Some(id) => {
+                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id.clone()))
+            }
+            None => RequestPermissionOutcome::Cancelled,
         },
-        Err(_) => (RequestPermissionOutcome::Cancelled, "cancelled"),
+        Err(_) => RequestPermissionOutcome::Cancelled,
     };
-
-    // Emit ToolApprovalResolved onto the per-session SSE channel.
-    // PermissionManager.resolve already emitted to the global event bus
-    // (webhooks, polling); the SSE stream needs its own copy.
-    if let Some(state) = sessions.get(&conv_id) {
-        let _ = state
-            .sse_tx
-            .send(BridgeEvent::new(
-                BridgeEventType::ToolApprovalResolved,
-                agent_id,
-                &conv_id,
-                json!({
-                    "tool_call_id": tool_call_id,
-                    "decision": decision_str,
-                }),
-            ))
-            .await;
-    }
 
     responder.respond(RequestPermissionResponse::new(outcome))
 }
