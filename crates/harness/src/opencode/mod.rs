@@ -10,6 +10,7 @@
 mod settings;
 
 use crate::acp_session::{AcpSession, HarnessAdapter};
+use crate::skills;
 use bridge_core::{AgentDefinition, BridgeError};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -57,6 +58,14 @@ pub async fn spawn(
     event_bus: Arc<EventBus>,
     permission_manager: Arc<PermissionManager>,
 ) -> Result<Arc<AcpSession>, BridgeError> {
+    // Materialize skills onto disk (opencode auto-discovers SKILL.md
+    // files inside `<OPENCODE_CONFIG_DIR>/skills/`; we also reference the
+    // directory explicitly via `skills.paths` in the JSON below for
+    // belt-and-suspenders).
+    if !agent.skills.is_empty() {
+        skills::write_skills(&opts.config_dir, &agent.skills);
+    }
+
     // Materialize the agent definition into opencode's config + instructions
     // files before spawn. opencode reads these via OPENCODE_CONFIG_DIR.
     let config_path = settings::write_config(&opts.config_dir, &opts.working_dir, &agent)

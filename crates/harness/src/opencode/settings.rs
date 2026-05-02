@@ -72,10 +72,12 @@ pub fn write_config(
     // api key threaded in. For ProviderType::Custom we wire the openai-
     // compatible AI SDK and register the model in the provider's `models`
     // map so opencode's strict provider/model validation accepts it.
-    if agent.provider.base_url.is_some() || matches!(
-        agent.provider.provider_type,
-        bridge_core::provider::ProviderType::Custom
-    ) {
+    if agent.provider.base_url.is_some()
+        || matches!(
+            agent.provider.provider_type,
+            bridge_core::provider::ProviderType::Custom
+        )
+    {
         let mut provider_block = Map::new();
         let mut entry = Map::new();
         let is_custom = matches!(
@@ -129,6 +131,20 @@ pub fn write_config(
             tools.insert(t.clone(), Value::Bool(false));
         }
         root.insert("tools".to_string(), Value::Object(tools));
+    }
+
+    // Skills materialized to disk under `<config_dir>/skills/<id>/SKILL.md`
+    // by `skills::write_skills`. opencode's auto-discovery scans
+    // `config.directories()` for `{skill,skills}/**/SKILL.md`, so writing
+    // to OPENCODE_CONFIG_DIR is usually sufficient — but we also add the
+    // dir to `skills.paths` so the discovery walk hits it deterministically
+    // even when opencode's `config.directories()` resolution misses.
+    if !agent.skills.is_empty() {
+        let skills_dir = config_dir.join("skills");
+        let skills_dir_s = skills_dir.to_string_lossy().to_string();
+        let mut skills_block = Map::new();
+        skills_block.insert("paths".to_string(), json!([skills_dir_s]));
+        root.insert("skills".to_string(), Value::Object(skills_block));
     }
 
     let path = config_dir.join("opencode.json");

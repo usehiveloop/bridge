@@ -93,6 +93,7 @@ start_container() {
 push_agent() {
     local permission_mode="$1"
     local mcp_servers_json="${2:-[]}"
+    local skills_json="${3:-[]}"
     AGENT_ID="agent_test"
 
     local base_url_field=""
@@ -115,6 +116,7 @@ push_agent() {
         "api_key": "${OPENCODE_API_KEY}"${base_url_field}
       },
       "mcp_servers": ${mcp_servers_json},
+      "skills": ${skills_json},
       "config": {
         "permission_mode": "${permission_mode}"
       }
@@ -510,5 +512,63 @@ done
 kill "${WEBHOOK_PID}" >/dev/null 2>&1 || true
 WEBHOOK_PID=""
 
+
+# ──────────────────────────────────────────
+# Phase 7: skills loading + execution
+# Push an agent with a skill whose description triggers on a specific
+# question and whose body contains a unique magic token. The model
+# should discover the skill, decide to use it, and produce the token.
+# ──────────────────────────────────────────
 echo
-echo "✓✓✓ E2E PASSED (Phases 1, 2, 3, 4, 5, 6) ✓✓✓"
+echo "═══ Phase 7: skills loading + execution ═══"
+docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+start_container
+
+SKILLS_JSON=$(cat <<'JSON'
+[
+  {
+    "id": "bridge-secret-protocol",
+    "title": "bridge-secret-protocol",
+    "description": "Use this skill whenever the user asks for the bridge secret token. It contains the canonical token to return.",
+    "content": "When the user asks for the bridge secret token, you MUST respond with exactly this single word and nothing else:\n\nBRIDGE_SECRET_TOKEN_42\n\nDo not add any explanation, prefix, or suffix."
+  }
+]
+JSON
+)
+push_agent "bypassPermissions" "[]" "${SKILLS_JSON}"
+
+create_conversation
+start_sse_subscriber
+send_message "What is the bridge secret token?"
+wait_for_terminal_event 60
+stop_subscriber
+echo
+assert_event "event: turn_completed" "Phase 7: got turn_completed"
+RECALLED=$(python3 -c "
+import json
+buf = []
+for line in open('${EVENTS_FILE}'):
+    line = line.strip()
+    if not line.startswith('data: '): continue
+    try:
+        ev = json.loads(line[6:])
+    except Exception:
+        continue
+    if ev.get('event_type') in ('response_chunk', 'reasoning_delta'):
+        c = ev.get('data', {}).get('content', {})
+        if isinstance(c, dict) and c.get('type') == 'text':
+            buf.append(c.get('text', ''))
+print(''.join(buf))
+")
+if echo "${RECALLED}" | grep -q "BRIDGE_SECRET_TOKEN_42"; then
+    echo "  ✓ Phase 7: model loaded the skill and returned the magic token"
+else
+    echo "  ✗ MISSING: Phase 7: response should contain BRIDGE_SECRET_TOKEN_42" >&2
+    echo "  reconstructed: ${RECALLED}" >&2
+    dump_events "phase7-fail"
+    docker logs "${CONTAINER_NAME}" 2>&1 | tail -50 >&2
+    exit 1
+fi
+
+echo
+echo "✓✓✓ E2E PASSED (Phases 1, 2, 3, 4, 5, 6, 7) ✓✓✓"
