@@ -156,6 +156,7 @@ dependencies = [
  "storage",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tower 0.5.3",
  "tower-http",
@@ -2962,6 +2963,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

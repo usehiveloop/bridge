@@ -137,6 +137,21 @@ impl StorageBackend for SqliteBackend {
         events::load_events_since(&self.conn, after_sequence, limit).await
     }
 
+    async fn load_events_since_for_conversation(
+        &self,
+        conversation_id: &str,
+        after_sequence: u64,
+        limit: u32,
+    ) -> Result<Vec<BridgeEvent>, StorageError> {
+        events::load_events_since_for_conversation(
+            &self.conn,
+            conversation_id,
+            after_sequence,
+            limit,
+        )
+        .await
+    }
+
     // ── Metrics ─────────────────────────────────────────────
 
     async fn save_metrics_snapshot(

@@ -4,14 +4,13 @@
 //! when one is already loaded returns a 409 Conflict. Delegates conversation
 //! lifecycle into the [`harness`] crate.
 
-use bridge_core::event::BridgeEvent;
 use bridge_core::mcp::McpServerDefinition;
 use bridge_core::metrics::MetricsSnapshot;
 use bridge_core::{AgentDefinition, AgentSummary, BridgeError, RuntimeConfig};
 use harness::AcpSession;
 use std::sync::Arc;
 use storage::{StorageBackend, StorageHandle};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use webhooks::{EventBus, PermissionManager};
@@ -169,14 +168,16 @@ impl AgentSupervisor {
         Ok(())
     }
 
-    /// Create a new conversation and return the SSE channel.
+    /// Create a new conversation. The SSE broadcast channel is registered
+    /// inside the harness; subscribers attach later via
+    /// `EventBus::subscribe_sse(conversation_id)`.
     pub async fn create_conversation(
         &self,
         agent_id: &str,
         api_key_override: Option<String>,
         provider_override: Option<bridge_core::ProviderConfig>,
         per_conversation_mcp: Option<Vec<McpServerDefinition>>,
-    ) -> Result<(String, mpsc::Receiver<BridgeEvent>), BridgeError> {
+    ) -> Result<String, BridgeError> {
         if self.agent_map.get(agent_id).is_none() {
             return Err(BridgeError::AgentNotFound(agent_id.to_string()));
         }
@@ -212,7 +213,7 @@ impl AgentSupervisor {
             );
         }
 
-        Ok((ctx.conversation_id, ctx.events))
+        Ok(ctx.conversation_id)
     }
 
     pub async fn send_message(
@@ -258,25 +259,15 @@ impl AgentSupervisor {
         slot.session.abort(conv_id).await
     }
 
-    pub async fn hydrate_conversations(
-        &self,
-        _agent_id: &str,
-        _records: Vec<bridge_core::conversation::ConversationRecord>,
-    ) -> Vec<(String, mpsc::Receiver<BridgeEvent>)> {
-        // ACP sessions cannot be reconstructed from old records; return empty
-        // and let clients re-establish.
-        Vec::new()
-    }
-
     /// Resume a previously-created conversation by id. Used at bridge boot
     /// time to restore sessions after a `docker stop` / `docker start`.
-    /// Returns the new SSE receiver (registered on the EventBus) so the
-    /// API layer can re-attach.
+    /// Re-registers the SSE broadcast on the EventBus; subscribers attach
+    /// independently via `EventBus::subscribe_sse`.
     pub async fn restore_conversation(
         &self,
         agent_id: &str,
         conv_id: &str,
-    ) -> Result<mpsc::Receiver<BridgeEvent>, BridgeError> {
+    ) -> Result<(), BridgeError> {
         let slot = self.harness.read().await;
         let slot = slot.as_ref().ok_or(BridgeError::HarnessUnavailable)?;
         if slot.agent_id != agent_id {
@@ -292,7 +283,7 @@ impl AgentSupervisor {
                 },
             );
         }
-        Ok(ctx.events)
+        Ok(())
     }
 
     pub async fn collect_metrics(&self) -> Vec<MetricsSnapshot> {

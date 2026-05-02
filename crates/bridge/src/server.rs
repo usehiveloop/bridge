@@ -98,7 +98,7 @@ pub(crate) async fn run_server() -> anyhow::Result<()> {
     );
 
     if let Some(backend) = &storage_backend {
-        restore_from_storage(backend, &supervisor, &app_state, &event_bus).await?;
+        restore_from_storage(backend, &supervisor, &event_bus).await?;
     }
 
     let app = api::build_router(app_state);
@@ -128,7 +128,6 @@ pub(crate) async fn run_server() -> anyhow::Result<()> {
 async fn restore_from_storage(
     backend: &Arc<dyn StorageBackend>,
     supervisor: &Arc<AgentSupervisor>,
-    app_state: &api::AppState,
     event_bus: &Arc<EventBus>,
 ) -> anyhow::Result<()> {
     let stored_agents = backend
@@ -159,8 +158,7 @@ async fn restore_from_storage(
         let mut restored = 0usize;
         for record in convs {
             match supervisor.restore_conversation(&agent.id, &record.id).await {
-                Ok(rx) => {
-                    app_state.sse_streams.insert(record.id.clone(), rx);
+                Ok(()) => {
                     restored += 1;
                 }
                 Err(e) => {

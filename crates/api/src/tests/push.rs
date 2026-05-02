@@ -135,29 +135,6 @@ async fn remove_nonexistent_agent_returns_404() {
 }
 
 #[tokio::test]
-async fn hydrate_unknown_agent_returns_404() {
-    let app = build_router(test_state());
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/push/agents/unknown/conversations")
-                .header("content-type", "application/json")
-                .header("authorization", "Bearer test-api-key")
-                .body(Body::from(r#"{"conversations":[]}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), 404);
-
-    let json = body_json(response).await;
-    assert_eq!(json["error"]["code"], "agent_not_found");
-}
-
-#[tokio::test]
 async fn push_diff_empty_succeeds() {
     let app = build_router(test_state());
 

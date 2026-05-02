@@ -1,8 +1,35 @@
 //! Write skill files into the harness's discovery directory before session start.
 
 use bridge_core::skill::SkillDefinition;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use tracing::warn;
+
+/// Resolve a relative skill-file key against the skill directory, rejecting
+/// anything that would escape it (absolute paths, `..` components, root or
+/// prefix components on Windows).
+///
+/// Returns `None` if the path is unsafe — the caller skips and logs.
+/// Empty paths and lone `.` components are also rejected.
+fn safe_join(base: &Path, rel: &str) -> Option<PathBuf> {
+    if rel.is_empty() {
+        return None;
+    }
+    let mut resolved = PathBuf::new();
+    for component in Path::new(rel).components() {
+        match component {
+            Component::Normal(part) => resolved.push(part),
+            // Reject anything that could escape or absolutize the path.
+            Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_)
+            | Component::CurDir => return None,
+        }
+    }
+    if resolved.as_os_str().is_empty() {
+        return None;
+    }
+    Some(base.join(resolved))
+}
 
 /// Write each skill as `<root>/skills/<id>/SKILL.md` with optional supporting files.
 ///
@@ -49,7 +76,14 @@ pub fn write_skills(root: &Path, skills: &[SkillDefinition]) {
         }
 
         for (rel, contents) in &skill.files {
-            let target = dir.join(rel);
+            let Some(target) = safe_join(&dir, rel) else {
+                warn!(
+                    skill = %skill.id,
+                    file = rel,
+                    "rejecting skill file path: must be a relative path with no '..' components"
+                );
+                continue;
+            };
             if let Some(parent) = target.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -57,5 +91,43 @@ pub fn write_skills(root: &Path, skills: &[SkillDefinition]) {
                 warn!(skill = %skill.id, file = rel, error = %e, "skill file write failed");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_join;
+    use std::path::Path;
+
+    #[test]
+    fn accepts_simple_filename() {
+        let r = safe_join(Path::new("/skills/foo"), "SKILL.md").unwrap();
+        assert_eq!(r, Path::new("/skills/foo/SKILL.md"));
+    }
+
+    #[test]
+    fn accepts_nested_subdir() {
+        let r = safe_join(Path::new("/skills/foo"), "references/issue-taxonomy.md").unwrap();
+        assert_eq!(r, Path::new("/skills/foo/references/issue-taxonomy.md"));
+    }
+
+    #[test]
+    fn rejects_parent_traversal() {
+        assert!(safe_join(Path::new("/skills/foo"), "../bar").is_none());
+        assert!(safe_join(Path::new("/skills/foo"), "a/../../bar").is_none());
+        assert!(safe_join(Path::new("/skills/foo"), "../../../etc/passwd").is_none());
+    }
+
+    #[test]
+    fn rejects_absolute() {
+        assert!(safe_join(Path::new("/skills/foo"), "/etc/passwd").is_none());
+        assert!(safe_join(Path::new("/skills/foo"), "/").is_none());
+    }
+
+    #[test]
+    fn rejects_empty_and_dot() {
+        assert!(safe_join(Path::new("/skills/foo"), "").is_none());
+        assert!(safe_join(Path::new("/skills/foo"), ".").is_none());
+        assert!(safe_join(Path::new("/skills/foo"), "./").is_none());
     }
 }

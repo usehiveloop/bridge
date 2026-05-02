@@ -20,7 +20,7 @@ await_holding_lock = "deny"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt", "io"] }
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # HTTP server
 axum = { version = "0.8", features = ["ws"] }

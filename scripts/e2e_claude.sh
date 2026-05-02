@@ -597,5 +597,138 @@ else
     exit 1
 fi
 
+# ──────────────────────────────────────────
+# Phase 8: cancel mid-stream
+# Issue a long prompt, wait until the model has emitted at least one
+# content_delta, then POST /abort. Expect a turn_completed (stop_reason
+# "cancelled" / "canceled" / "interrupted") within a few seconds.
+# ──────────────────────────────────────────
 echo
-echo "✓✓✓ E2E PASSED (Phases 1, 2, 3, 4, 5, 6, 7) ✓✓✓"
+echo "═══ Phase 8: cancel mid-stream ═══"
+docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+start_container "bypassPermissions"
+push_agent "bypassPermissions"
+
+create_conversation
+start_sse_subscriber
+send_message "Write a 2000 word essay about the history of distributed systems, very slowly, paragraph by paragraph. Do not stop until I tell you to."
+
+echo "→ waiting for first content_delta (proves stream is live)"
+DELTA_DEADLINE=$((SECONDS + 30))
+while (( SECONDS < DELTA_DEADLINE )); do
+    if grep -q "event: content_delta\|event: reasoning_delta" "${EVENTS_FILE}" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+if ! grep -q "event: content_delta\|event: reasoning_delta" "${EVENTS_FILE}" 2>/dev/null; then
+    echo "✗ never saw a delta before timeout — model produced no output to cancel" >&2
+    dump_events "phase8-no-delta"
+    docker logs "${CONTAINER_NAME}" 2>&1 | tail -100 >&2
+    exit 1
+fi
+
+echo "→ aborting conversation"
+ABORT_T0=$SECONDS
+curl -fsS -X POST "${BRIDGE_BASE_URL}/conversations/${CONV_ID}/abort" \
+    -H "content-type: application/json" >/dev/null
+
+wait_for_terminal_event 30
+ABORT_ELAPSED=$((SECONDS - ABORT_T0))
+stop_subscriber
+echo "  abort → terminal in ${ABORT_ELAPSED}s"
+
+# stop_reason must reflect a cancellation, not "end_turn".
+LAST_TURN=$(grep -A1 "event: turn_completed" "${EVENTS_FILE}" | tail -1 || true)
+STOP=$(echo "${LAST_TURN}" | python3 -c "
+import sys, json
+line = sys.stdin.read().strip()
+if line.startswith('data: '):
+    line = line[6:]
+try:
+    j = json.loads(line)
+    print(j.get('data', {}).get('stop_reason', ''))
+except Exception:
+    print('')
+")
+echo "  stop_reason: '${STOP}'"
+case "${STOP}" in
+    cancelled|canceled|interrupted|aborted)
+        echo "  ✓ Phase 8: turn ended with cancellation reason"
+        ;;
+    *)
+        echo "  ✗ Phase 8: expected cancelled/canceled/interrupted, got '${STOP}'" >&2
+        dump_events "phase8-stop-reason"
+        docker logs "${CONTAINER_NAME}" 2>&1 | tail -50 >&2
+        exit 1
+        ;;
+esac
+
+
+# ──────────────────────────────────────────
+# Phase 9: deny tool approval
+# Default permission_mode → request the Write tool → deny via API →
+# expect tool_approval_resolved + turn_completed; verify the file was
+# NOT created inside the container (the deny must actually be honored).
+# ──────────────────────────────────────────
+echo
+echo "═══ Phase 9: deny tool approval ═══"
+docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+start_container "default"
+push_agent "default"
+
+# Pre-clean: the file must not exist before the prompt runs.
+docker exec "${CONTAINER_NAME}" sh -c 'rm -f /workspace/denied.txt' >/dev/null 2>&1 || true
+
+create_conversation
+start_sse_subscriber
+send_message "Use the Write tool to create the file /workspace/denied.txt with contents: SHOULD_NOT_EXIST. Then confirm you wrote it."
+
+echo "→ waiting for tool_approval_required (up to 30s)"
+APPROVAL_DEADLINE=$((SECONDS + 30))
+APPROVAL_REQ_ID=""
+while (( SECONDS < APPROVAL_DEADLINE )); do
+    if grep -q "event: tool_approval_required" "${EVENTS_FILE}" 2>/dev/null; then
+        REQS=$(curl -sS "${BRIDGE_BASE_URL}/agents/${AGENT_ID}/conversations/${CONV_ID}/approvals")
+        APPROVAL_REQ_ID=$(echo "${REQS}" | python3 -c "import sys,json;j=json.load(sys.stdin);print(j[0]['id'] if j else '')")
+        if [[ -n "${APPROVAL_REQ_ID}" ]]; then
+            break
+        fi
+    fi
+    sleep 1
+done
+
+if [[ -z "${APPROVAL_REQ_ID}" ]]; then
+    echo "✗ no approval request appeared" >&2
+    dump_events "phase9-no-approval"
+    docker logs "${CONTAINER_NAME}" 2>&1 | tail -100 >&2
+    exit 1
+fi
+echo "  approval id: ${APPROVAL_REQ_ID}"
+
+echo "→ denying via API"
+curl -fsS -X POST "${BRIDGE_BASE_URL}/agents/${AGENT_ID}/conversations/${CONV_ID}/approvals/${APPROVAL_REQ_ID}" \
+    -H "content-type: application/json" \
+    -d '{"decision": "deny"}' >/dev/null
+
+wait_for_terminal_event 60
+stop_subscriber
+echo
+
+assert_event "event: tool_approval_required" "Phase 9: got tool_approval_required"
+assert_event "event: tool_approval_resolved" "Phase 9: got tool_approval_resolved"
+assert_event "event: turn_completed" "Phase 9: got turn_completed"
+
+# The file must not have been written — the deny must have actually
+# blocked the side effect, not just logged a refusal.
+if docker exec "${CONTAINER_NAME}" sh -c 'test -e /workspace/denied.txt' 2>/dev/null; then
+    echo "  ✗ Phase 9: /workspace/denied.txt exists — deny did not block the write" >&2
+    docker exec "${CONTAINER_NAME}" sh -c 'ls -la /workspace/denied.txt; cat /workspace/denied.txt' >&2
+    dump_events "phase9-file-written"
+    exit 1
+fi
+echo "  ✓ Phase 9: /workspace/denied.txt was not created"
+
+
+echo
+echo "✓✓✓ E2E PASSED (Phases 1, 2, 3, 4, 5, 6, 7, 8, 9) ✓✓✓"

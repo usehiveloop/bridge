@@ -30,10 +30,13 @@ use tracing::{error, info, warn};
 use webhooks::{EventBus, PermissionManager};
 
 /// Per-conversation context returned to the supervisor.
+///
+/// Event consumers attach via [`webhooks::EventBus::subscribe_sse`] using
+/// the conversation id; the harness no longer hands out a single-shot
+/// receiver because the SSE channel is now multi-subscriber.
 pub struct ConversationContext {
     pub agent_id: String,
     pub conversation_id: String,
-    pub events: mpsc::Receiver<BridgeEvent>,
 }
 
 /// Per-harness behaviour the shared driver delegates to.
@@ -308,9 +311,8 @@ impl AcpSession {
             .map_err(|_| BridgeError::HarnessError("session creation cancelled".into()))?
             .map_err(BridgeError::HarnessError)?;
 
-        let sse_rx = self
-            .event_bus
-            .register_sse_stream(session_id.0.to_string(), 256);
+        self.event_bus
+            .register_sse_stream(session_id.0.to_string());
         self.sessions.insert(
             session_id.0.to_string(),
             SessionState {
@@ -321,7 +323,6 @@ impl AcpSession {
         Ok(ConversationContext {
             agent_id: self.agent_id.clone(),
             conversation_id: session_id.0.to_string(),
-            events: sse_rx,
         })
     }
 
@@ -343,9 +344,8 @@ impl AcpSession {
             .map_err(|_| BridgeError::HarnessError("session load cancelled".into()))?
             .map_err(BridgeError::HarnessError)?;
 
-        let sse_rx = self
-            .event_bus
-            .register_sse_stream(session_id.0.to_string(), 256);
+        self.event_bus
+            .register_sse_stream(session_id.0.to_string());
         self.sessions.insert(
             session_id.0.to_string(),
             SessionState {
@@ -355,7 +355,6 @@ impl AcpSession {
         Ok(ConversationContext {
             agent_id: self.agent_id.clone(),
             conversation_id: session_id.0.to_string(),
-            events: sse_rx,
         })
     }
 

@@ -78,6 +78,16 @@ pub trait StorageBackend: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<BridgeEvent>, StorageError>;
 
+    /// Load events for a specific conversation with sequence_number >
+    /// `after_sequence`, up to `limit`. Used by the SSE handler to fulfil
+    /// `Last-Event-ID` resume requests.
+    async fn load_events_since_for_conversation(
+        &self,
+        conversation_id: &str,
+        after_sequence: u64,
+        limit: u32,
+    ) -> Result<Vec<BridgeEvent>, StorageError>;
+
     /// Load all undelivered events for replay after restart.
     async fn load_pending_events(&self) -> Result<Vec<BridgeEvent>, StorageError>;
 
