@@ -98,7 +98,7 @@ pub(crate) async fn run_server() -> anyhow::Result<()> {
     );
 
     if let Some(backend) = &storage_backend {
-        restore_from_storage(backend, &supervisor, &event_bus).await?;
+        restore_from_storage(backend, &supervisor, &app_state, &event_bus).await?;
     }
 
     let app = api::build_router(app_state);
@@ -128,6 +128,7 @@ pub(crate) async fn run_server() -> anyhow::Result<()> {
 async fn restore_from_storage(
     backend: &Arc<dyn StorageBackend>,
     supervisor: &Arc<AgentSupervisor>,
+    app_state: &api::AppState,
     event_bus: &Arc<EventBus>,
 ) -> anyhow::Result<()> {
     let stored_agents = backend
@@ -138,15 +139,47 @@ async fn restore_from_storage(
     if !stored_agents.is_empty() {
         let agent_count = stored_agents.len();
         supervisor
-            .load_agents(stored_agents)
+            .load_agents(stored_agents.clone())
             .await
             .context("failed to restore stored agents")?;
         info!(count = agent_count, "restored agents from storage");
     }
 
-    // Conversation hydration is owned by the harness adapter; the stub
-    // supervisor returns no SSE receivers. Pending events still get
-    // replayed so webhook outbox catches up.
+    // Resume any conversations that survived the previous shutdown.
+    // Each is restored via ACP `session/load` which pulls from
+    // claude-agent-acp's own on-disk transcript under
+    // `$CLAUDE_CONFIG_DIR/projects/...`. We then re-attach the SSE stream
+    // so subscribers can resume.
+    for agent in &stored_agents {
+        let convs = backend
+            .load_conversations(&agent.id)
+            .await
+            .with_context(|| format!("failed to load conversations for {}", agent.id))?;
+
+        let mut restored = 0usize;
+        for record in convs {
+            match supervisor.restore_conversation(&agent.id, &record.id).await {
+                Ok(rx) => {
+                    app_state.sse_streams.insert(record.id.clone(), rx);
+                    restored += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent_id = %agent.id,
+                        conversation_id = %record.id,
+                        error = %e,
+                        "failed to restore conversation; dropping from storage"
+                    );
+                    backend.delete_conversation(&record.id).await.ok();
+                }
+            }
+        }
+        if restored > 0 {
+            info!(agent_id = %agent.id, count = restored, "restored conversations");
+        }
+    }
+
+    // Replay pending events so the webhook outbox catches up.
     let pending_events = backend
         .load_pending_events()
         .await

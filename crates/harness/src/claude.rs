@@ -8,9 +8,10 @@ use crate::events;
 use crate::settings;
 use crate::skills;
 use agent_client_protocol::schema::{
-    CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
-    ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionId, SessionNotification, TextContent,
+    CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest,
+    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionId, SessionNotification,
+    TextContent,
 };
 use agent_client_protocol::{ByteStreams, Client, ConnectionTo, Responder};
 use bridge_core::event::{BridgeEvent, BridgeEventType};
@@ -152,6 +153,10 @@ enum Cmd {
         provider_override: Option<bridge_core::ProviderConfig>,
         per_conversation_mcp: Option<Vec<McpServerDefinition>>,
         reply: oneshot::Sender<Result<SessionId, String>>,
+    },
+    LoadSession {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     Prompt {
         session_id: SessionId,
@@ -322,6 +327,25 @@ impl ClaudeHarness {
                                         cx.send_notification(CancelNotification::new(session_id));
                                     let _ = reply.send(Ok(()));
                                 }
+                                Cmd::LoadSession { session_id, reply } => {
+                                    let agent_def = agent_def_for_driver.read().await.clone();
+                                    let mcp_servers =
+                                        build_mcp_servers(&agent_def.mcp_servers, None);
+                                    let mut req =
+                                        LoadSessionRequest::new(session_id, cwd_for_driver.clone());
+                                    if !mcp_servers.is_empty() {
+                                        req = req.mcp_servers(mcp_servers);
+                                    }
+                                    match cx.send_request(req).block_task().await {
+                                        Ok(_) => {
+                                            let _ = reply.send(Ok(()));
+                                        }
+                                        Err(e) => {
+                                            let _ = reply
+                                                .send(Err(format!("session/load failed: {e}")));
+                                        }
+                                    }
+                                }
                             }
                         }
                         Ok(())
@@ -383,6 +407,46 @@ impl ClaudeHarness {
             },
         );
 
+        Ok(ConversationContext {
+            agent_id: self.agent_id.clone(),
+            conversation_id: session_id.0.to_string(),
+            events: sse_rx,
+        })
+    }
+
+    /// Resume a previously-created conversation by its ACP session id.
+    ///
+    /// Sends `session/load` to claude-agent-acp, which restores from its
+    /// own on-disk transcript under `$CLAUDE_CONFIG_DIR/projects/...`.
+    /// Registers a fresh SSE stream on the EventBus and returns its
+    /// receiver so the API layer can re-attach.
+    pub async fn restore_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<ConversationContext, BridgeError> {
+        let session_id = SessionId::new(conversation_id);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::LoadSession {
+                session_id: session_id.clone(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| BridgeError::HarnessError("harness driver dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| BridgeError::HarnessError("session load cancelled".into()))?
+            .map_err(BridgeError::HarnessError)?;
+
+        let sse_rx = self
+            .event_bus
+            .register_sse_stream(session_id.0.to_string(), 256);
+        self.sessions.insert(
+            session_id.0.to_string(),
+            SessionState {
+                session_id: session_id.clone(),
+            },
+        );
         Ok(ConversationContext {
             agent_id: self.agent_id.clone(),
             conversation_id: session_id.0.to_string(),

@@ -54,7 +54,7 @@ start_container() {
     docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
     echo "→ starting container (permission_mode=${permission_mode})"
-    docker run -d --rm --name "${CONTAINER_NAME}" \
+    docker run -d --name "${CONTAINER_NAME}" \
         -p 8080:8080 \
         -e ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL}" \
         -e ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN}" \
@@ -335,5 +335,73 @@ fi
 assert_event "event: tool_call_result" "Phase 4b: got tool_call_result"
 assert_event "event: turn_completed" "Phase 4b: got turn_completed"
 
+
+# ──────────────────────────────────────────
+# Phase 5: stop/start container — restore conversation
+# Daytona-style sleep simulation: docker stop preserves the writable
+# layer (claude session backup + bridge.db). After docker start, bridge
+# should call ACP session/load for every persisted conversation. We then
+# send a follow-up referencing the prior turn and assert the response
+# shows context awareness.
+# ──────────────────────────────────────────
 echo
-echo "✓✓✓ E2E PASSED (Phases 1, 2, 3, 4) ✓✓✓"
+echo "═══ Phase 5: stop/start, restore conversation ═══"
+
+# Phase 5a — establish a conversation with a memorable seed turn.
+docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+start_container "bypassPermissions"
+push_agent "bypassPermissions"
+create_conversation
+SAVED_CONV_ID="${CONV_ID}"
+start_sse_subscriber
+send_message "Remember this token: PURPLE_LLAMA_42. Reply with 'noted'."
+wait_for_terminal_event 30
+stop_subscriber
+echo
+assert_event "event: turn_completed" "Phase 5a: pre-restart turn_completed"
+
+# Phase 5b — stop + start, then send follow-up that references the seed.
+echo "→ stopping container (preserves writable layer)"
+docker stop "${CONTAINER_NAME}" >/dev/null
+echo "→ restarting container"
+docker start "${CONTAINER_NAME}" >/dev/null
+echo "→ waiting for /health"
+for i in {1..30}; do
+    if curl -fsS "${BRIDGE_BASE_URL}/health" >/dev/null 2>&1; then
+        echo "  bridge healthy after ${i}s"
+        break
+    fi
+    sleep 1
+done
+
+# Confirm the agent and conversation survived.
+RESTORED_AGENTS=$(curl -fsS "${BRIDGE_BASE_URL}/agents" | python3 -c "import sys,json;print(len(json.load(sys.stdin)))")
+if [[ "${RESTORED_AGENTS}" != "1" ]]; then
+    echo "✗ expected 1 restored agent, got ${RESTORED_AGENTS}" >&2
+    docker logs "${CONTAINER_NAME}" 2>&1 | tail -50 >&2
+    exit 1
+fi
+echo "  ✓ Phase 5b: agent restored from storage"
+
+CONV_ID="${SAVED_CONV_ID}"
+EVENTS_FILE=$(mktemp /tmp/bridge_events.XXXXXX)
+curl -sN "${BRIDGE_BASE_URL}/conversations/${CONV_ID}/stream" > "${EVENTS_FILE}" &
+SSE_PID=$!
+sleep 1
+send_message "What was the token I asked you to remember? Reply with just the token."
+wait_for_terminal_event 45
+stop_subscriber
+echo
+assert_event "event: content_delta" "Phase 5b: post-restart content_delta"
+assert_event "event: turn_completed" "Phase 5b: post-restart turn_completed"
+if grep -q "PURPLE_LLAMA_42" "${EVENTS_FILE}"; then
+    echo "  ✓ Phase 5b: response references the pre-restart token (PURPLE_LLAMA_42)"
+else
+    echo "  ✗ MISSING: Phase 5b: response should mention PURPLE_LLAMA_42" >&2
+    dump_events "phase5b-fail"
+    docker logs "${CONTAINER_NAME}" 2>&1 | tail -50 >&2
+    exit 1
+fi
+
+echo
+echo "✓✓✓ E2E PASSED (Phases 1, 2, 3, 4, 5) ✓✓✓"

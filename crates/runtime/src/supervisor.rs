@@ -190,15 +190,25 @@ impl AgentSupervisor {
             .create_conversation(api_key_override, provider_override, per_conversation_mcp)
             .await?;
 
-        // Track the conversation on the AgentState too so the API's
-        // `find_agent_for_conversation` can find it.
+        // Track the conversation on the AgentState so the API's
+        // `find_agent_for_conversation` can find it, and persist a row
+        // so a stop/start of the bridge process can restore it.
+        let created_at = chrono::Utc::now();
         if let Some(agent) = self.agent_map.get(agent_id) {
             agent.conversations.insert(
                 ctx.conversation_id.clone(),
                 crate::agent_state::ConversationHandle {
                     id: ctx.conversation_id.clone(),
-                    created_at: chrono::Utc::now(),
+                    created_at,
                 },
+            );
+        }
+        if let Some(storage) = &self.storage {
+            storage.create_conversation(
+                agent_id.to_string(),
+                ctx.conversation_id.clone(),
+                None,
+                created_at,
             );
         }
 
@@ -222,6 +232,9 @@ impl AgentSupervisor {
     pub fn end_conversation(&self, agent_id: &str, conv_id: &str) -> Result<(), BridgeError> {
         if let Some(agent) = self.agent_map.get(agent_id) {
             agent.conversations.remove(conv_id);
+        }
+        if let Some(storage) = &self.storage {
+            storage.delete_conversation(conv_id.to_string());
         }
         let claude_opt = self
             .harness
@@ -253,6 +266,33 @@ impl AgentSupervisor {
         // ACP sessions cannot be reconstructed from old records; return empty
         // and let clients re-establish.
         Vec::new()
+    }
+
+    /// Resume a previously-created conversation by id. Used at bridge boot
+    /// time to restore sessions after a `docker stop` / `docker start`.
+    /// Returns the new SSE receiver (registered on the EventBus) so the
+    /// API layer can re-attach.
+    pub async fn restore_conversation(
+        &self,
+        agent_id: &str,
+        conv_id: &str,
+    ) -> Result<mpsc::Receiver<BridgeEvent>, BridgeError> {
+        let slot = self.harness.read().await;
+        let slot = slot.as_ref().ok_or(BridgeError::HarnessUnavailable)?;
+        if slot.agent_id != agent_id {
+            return Err(BridgeError::AgentNotFound(agent_id.to_string()));
+        }
+        let ctx = slot.claude.restore_conversation(conv_id).await?;
+        if let Some(agent) = self.agent_map.get(agent_id) {
+            agent.conversations.insert(
+                ctx.conversation_id.clone(),
+                crate::agent_state::ConversationHandle {
+                    id: ctx.conversation_id.clone(),
+                    created_at: chrono::Utc::now(),
+                },
+            );
+        }
+        Ok(ctx.events)
     }
 
     pub async fn collect_metrics(&self) -> Vec<MetricsSnapshot> {
