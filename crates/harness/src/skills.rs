@@ -2,7 +2,7 @@
 
 use bridge_core::skill::SkillDefinition;
 use std::path::{Component, Path, PathBuf};
-use tracing::warn;
+use tracing::{error, warn};
 
 /// Resolve a relative skill-file key against the skill directory, rejecting
 /// anything that would escape it (absolute paths, `..` components, root or
@@ -77,10 +77,12 @@ pub fn write_skills(root: &Path, skills: &[SkillDefinition]) {
 
         for (rel, contents) in &skill.files {
             let Some(target) = safe_join(&dir, rel) else {
-                warn!(
+                // Path traversal attempt — surfaced as an error so it
+                // shows up in Sentry / on-call alerts.
+                error!(
                     skill = %skill.id,
                     file = rel,
-                    "rejecting skill file path: must be a relative path with no '..' components"
+                    "rejecting skill file path: traversal or absolute path detected"
                 );
                 continue;
             };
@@ -88,7 +90,7 @@ pub fn write_skills(root: &Path, skills: &[SkillDefinition]) {
                 let _ = std::fs::create_dir_all(parent);
             }
             if let Err(e) = std::fs::write(&target, contents) {
-                warn!(skill = %skill.id, file = rel, error = %e, "skill file write failed");
+                error!(skill = %skill.id, file = rel, error = %e, "skill file write failed");
             }
         }
     }

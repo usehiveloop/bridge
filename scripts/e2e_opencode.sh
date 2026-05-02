@@ -71,10 +71,18 @@ start_container() {
         webhook_arg="-e BRIDGE_WEBHOOK_URL=${webhook_url}"
     fi
 
+    local sentry_args=()
+    if [[ -n "${SENTRY_DSN:-}" ]]; then
+        sentry_args+=(-e "SENTRY_DSN=${SENTRY_DSN}")
+        sentry_args+=(-e "SENTRY_ENVIRONMENT=${SENTRY_ENVIRONMENT:-e2e}")
+        sentry_args+=(-e "BRIDGE_INSTANCE_ID=${BRIDGE_INSTANCE_ID:-bridge-e2e-opencode}")
+    fi
+
     echo "→ starting container${webhook_url:+ webhook=${webhook_url}}"
     docker run -d --name "${CONTAINER_NAME}" \
         -p 8080:8080 \
         ${webhook_arg} \
+        "${sentry_args[@]}" \
         "${IMAGE_TAG}" >/dev/null
 
     echo "→ waiting for /health"

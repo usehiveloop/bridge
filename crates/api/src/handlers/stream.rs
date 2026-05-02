@@ -90,15 +90,24 @@ fn build_stream(
         Some(serialize(&ev))
     }));
 
-    // BroadcastStream surfaces lagged errors as `Lagged(skipped)`. We drop
-    // those events silently — the client should reconnect with the last
-    // sequence_number it actually received and let DB replay fill the gap.
+    // BroadcastStream surfaces lagged errors as `Lagged(skipped)`. The
+    // client should reconnect with the last sequence_number it actually
+    // received and let DB replay fill the gap. We log lag at error level
+    // so it surfaces in Sentry — repeated lag means a slow consumer or
+    // an undersized broadcast buffer.
     let live_stream = BroadcastStream::new(live_rx).filter_map(move |item| {
         let cursor = cursor;
         async move {
             match item {
                 Ok(ev) if ev.sequence_number > cursor => Some(serialize(&ev)),
-                _ => None,
+                Ok(_) => None,
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                    tracing::error!(
+                        skipped = n,
+                        "SSE subscriber fell behind broadcast buffer; events dropped"
+                    );
+                    None
+                }
             }
         }
     });

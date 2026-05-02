@@ -57,6 +57,14 @@ opentelemetry = "0.29"
 opentelemetry_sdk = { version = "0.29", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.29", features = ["grpc-tonic"] }
 
+# Sentry — error/panic reporting (errors-only, no perf traces by default).
+# `tower` integration brings axum middleware compat; `tracing` makes
+# tracing events become breadcrumbs automatically.
+sentry = { version = "0.48", default-features = false, features = [
+    "backtrace", "contexts", "panic", "reqwest", "rustls", "tracing",
+] }
+sentry-tower = { version = "0.48", features = ["http", "axum-matched-path"] }
+
 # Config
 figment = { version = "0.10", features = ["toml", "env"] }
 

@@ -3,10 +3,12 @@ use bridge_core::RuntimeConfig;
 use figment::providers::{Env, Format, Serialized, Toml};
 use figment::Figment;
 use runtime::AgentSupervisor;
+use sentry_tower::{NewSentryLayer, SentryHttpLayer};
 use std::sync::Arc;
 use storage::{StorageBackend, StorageHandle};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+use tower::ServiceBuilder;
 use tracing::info;
 use webhooks::EventBus;
 
@@ -101,7 +103,15 @@ pub(crate) async fn run_server() -> anyhow::Result<()> {
         restore_from_storage(backend, &supervisor, &event_bus).await?;
     }
 
-    let app = api::build_router(app_state);
+    // Wrap the router so every HTTP request gets:
+    //   - a fresh Sentry hub (so per-request configure_scope tags don't
+    //     leak across requests)
+    //   - HTTP transaction tags (method, path, status); 5xx responses are
+    //     captured as Sentry events automatically.
+    let sentry_layer = ServiceBuilder::new()
+        .layer(NewSentryLayer::new_from_top())
+        .layer(SentryHttpLayer::new().enable_transaction());
+    let app = api::build_router(app_state).layer(sentry_layer);
 
     let listener = TcpListener::bind(&config.listen_addr)
         .await
@@ -162,11 +172,11 @@ async fn restore_from_storage(
                     restored += 1;
                 }
                 Err(e) => {
-                    tracing::warn!(
+                    tracing::error!(
                         agent_id = %agent.id,
                         conversation_id = %record.id,
                         error = %e,
-                        "failed to restore conversation; dropping from storage"
+                        "failed to restore conversation on boot; dropping from storage"
                     );
                     backend.delete_conversation(&record.id).await.ok();
                 }

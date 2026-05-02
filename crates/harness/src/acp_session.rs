@@ -26,7 +26,7 @@ use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use webhooks::{EventBus, PermissionManager};
 
 /// Per-conversation context returned to the supervisor.
@@ -91,7 +91,9 @@ pub struct AcpSession {
     sessions: Arc<DashMap<String, SessionState>>,
     event_bus: Arc<EventBus>,
     _driver: JoinHandle<()>,
-    _child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
+    /// JoinHandle for the subprocess watcher task. The child itself is
+    /// owned (and `wait`ed on) inside the watcher task.
+    _child_watcher: JoinHandle<()>,
 }
 
 impl AcpSession {
@@ -102,7 +104,7 @@ impl AcpSession {
         cwd: PathBuf,
         stdin: ChildStdin,
         stdout: ChildStdout,
-        child: tokio::process::Child,
+        mut child: tokio::process::Child,
         event_bus: Arc<EventBus>,
         permission_manager: Arc<PermissionManager>,
         adapter: Arc<dyn HarnessAdapter>,
@@ -111,6 +113,48 @@ impl AcpSession {
         let sessions: Arc<DashMap<String, SessionState>> = Arc::new(DashMap::new());
         let agent_id = agent.id.clone();
         let agent_def: AgentDefStore = Arc::new(RwLock::new(agent));
+
+        // Watch the spawned ACP-agent subprocess. If it exits unexpectedly,
+        // log + Sentry-capture so the failure isn't silent. We can't restart
+        // it from here without losing in-flight session state, so this is
+        // an alarm channel only.
+        let child_watcher_pid = child.id();
+        let child_watcher_harness = adapter.name();
+        let child_watcher_agent = agent_id.clone();
+        let child_handle = tokio::spawn(async move {
+            match child.wait().await {
+                Ok(status) => {
+                    let code = status.code();
+                    let signal = {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::process::ExitStatusExt;
+                            status.signal()
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            None::<i32>
+                        }
+                    };
+                    error!(
+                        harness = child_watcher_harness,
+                        agent_id = %child_watcher_agent,
+                        pid = ?child_watcher_pid,
+                        exit_code = ?code,
+                        signal = ?signal,
+                        "ACP agent subprocess exited — bridge can no longer drive new turns for this session"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        harness = child_watcher_harness,
+                        agent_id = %child_watcher_agent,
+                        error = %e,
+                        "ACP agent subprocess wait() failed"
+                    );
+                }
+            }
+        });
 
         let agent_id_for_notif = agent_id.clone();
         let agent_id_for_perm = agent_id.clone();
@@ -227,7 +271,12 @@ impl AcpSession {
                                                 ));
                                             }
                                             Err(e) => {
-                                                warn!(error = %e, "prompt failed");
+                                                error!(
+                                                    agent_id = %agent_id,
+                                                    conversation_id = %conv_id,
+                                                    error = %e,
+                                                    "ACP prompt failed"
+                                                );
                                                 event_bus.emit(BridgeEvent::new(
                                                     BridgeEventType::AgentError,
                                                     &agent_id,
@@ -281,7 +330,7 @@ impl AcpSession {
             sessions,
             event_bus,
             _driver: driver,
-            _child: Arc::new(tokio::sync::Mutex::new(child)),
+            _child_watcher: child_handle,
         }))
     }
 
