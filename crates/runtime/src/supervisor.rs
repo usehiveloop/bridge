@@ -12,7 +12,6 @@ use bridge_core::event::BridgeEvent;
 use bridge_core::mcp::McpServerDefinition;
 use bridge_core::metrics::MetricsSnapshot;
 use bridge_core::{AgentDefinition, AgentSummary, BridgeError, RuntimeConfig};
-use std::collections::HashMap;
 use std::sync::Arc;
 use storage::{StorageBackend, StorageHandle};
 use tokio::sync::mpsc;
@@ -141,14 +140,10 @@ impl AgentSupervisor {
     }
 
     /// Stub. Returns `HarnessUnavailable` until the ACP adapter lands.
-    #[allow(clippy::too_many_arguments)]
     pub async fn create_conversation(
         &self,
         agent_id: &str,
-        _filter_tool_names: Option<Vec<String>>,
-        _filter_mcp_server_names: Option<Vec<String>>,
         _api_key_override: Option<String>,
-        _subagent_api_key_overrides: Option<HashMap<String, String>>,
         _provider_override: Option<bridge_core::ProviderConfig>,
         _per_conversation_mcp_servers: Option<Vec<McpServerDefinition>>,
     ) -> Result<(String, mpsc::Receiver<BridgeEvent>), BridgeError> {
@@ -167,11 +162,6 @@ impl AgentSupervisor {
         _system_reminder: Option<String>,
     ) -> Result<(), BridgeError> {
         Err(BridgeError::HarnessUnavailable)
-    }
-
-    /// Stub. Always returns `None` — callers fall back to an empty list.
-    pub fn agent_tool_names(&self, _agent_id: &str) -> Option<Vec<String>> {
-        None
     }
 
     /// Stub. The new harness owns conversation lifecycle.

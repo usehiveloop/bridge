@@ -3,13 +3,6 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Empty entry kept so `AgentState::subagents` can hold per-subagent rows
-/// when the harness adapter populates them. For now it carries a name only.
-#[derive(Default)]
-pub struct SubAgentEntry {
-    pub registered_tools: Vec<(String, String)>,
-}
-
 /// Handle for an active conversation. Inert — populated only when the
 /// harness adapter is wired up.
 pub struct ConversationHandle {
@@ -26,7 +19,6 @@ pub struct ConversationHandle {
 pub struct AgentState {
     pub definition: RwLock<AgentDefinition>,
     pub metrics: Arc<AgentMetrics>,
-    pub subagents: Arc<DashMap<String, SubAgentEntry>>,
     pub conversations: DashMap<String, ConversationHandle>,
 }
 
@@ -35,7 +27,6 @@ impl AgentState {
         Self {
             definition: RwLock::new(definition),
             metrics: Arc::new(AgentMetrics::new()),
-            subagents: Arc::new(DashMap::new()),
             conversations: DashMap::new(),
         }
     }

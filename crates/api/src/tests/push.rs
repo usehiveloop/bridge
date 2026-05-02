@@ -84,6 +84,7 @@ async fn upsert_agent_path_body_mismatch_returns_400() {
     let body = serde_json::json!({
         "id": "bar",
         "name": "Test",
+        "harness": "claude",
         "system_prompt": "test",
         "provider": {
             "provider_type": "anthropic",

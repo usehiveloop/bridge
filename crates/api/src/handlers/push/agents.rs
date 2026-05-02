@@ -25,9 +25,7 @@ pub async fn push_agents(
     State(state): State<AppState>,
     Json(body): Json<PushAgentsRequest>,
 ) -> Result<(StatusCode, Json<PushAgentsResponse>), BridgeError> {
-    // Semantic validation before handing to the supervisor. Catches things
-    // like tool_requirements ∩ disabled_tools conflicts up-front so the
-    // caller sees a clear 400 instead of a silently-broken agent.
+    // Semantic validation before handing to the supervisor.
     for agent in &body.agents {
         agent
             .validate()
@@ -71,7 +69,7 @@ pub async fn upsert_agent(
         )));
     }
 
-    // Semantic validation (tool_requirements ∩ disabled_tools, etc.)
+    // Semantic validation.
     agent
         .validate()
         .map_err(|msg| BridgeError::InvalidRequest(format!("agent '{}': {}", agent.id, msg)))?;
