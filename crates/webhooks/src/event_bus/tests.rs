@@ -158,17 +158,28 @@ fn test_emit_without_any_subscribers_does_not_panic() {
 }
 
 #[test]
-fn test_emit_replayed_skips_db_but_fans_out() {
+fn test_emit_replayed_only_targets_webhook() {
     let (webhook_tx, mut webhook_rx) = mpsc::unbounded_channel();
     let bus = EventBus::new(Some(webhook_tx), None, String::new(), String::new());
     let mut ws_rx = bus.subscribe_ws();
+    let mut sse_rx = bus.register_sse_stream("conv-1".to_string(), 16);
 
-    bus.emit_replayed(make_event("conv-1"));
+    let mut event = make_event("conv-1");
+    event.sequence_number = 42;
+    bus.emit_replayed(event);
 
-    let ws = ws_rx.try_recv().unwrap();
+    // Live channels do not receive replays — they're for fresh-after-startup
+    // activity only.
+    assert!(ws_rx.try_recv().is_err());
+    assert!(sse_rx.try_recv().is_err());
+
+    // Webhook gets the original event with its original sequence_number.
     let wh = webhook_rx.try_recv().unwrap();
-    assert_eq!(ws.sequence_number, 1);
-    assert_eq!(wh.sequence_number, 1);
+    assert_eq!(wh.sequence_number, 42);
+
+    // emit_replayed must not advance the sequence counter — fresh emits
+    // continue from where we were.
+    assert_eq!(bus.current_sequence(), 0);
 }
 
 #[test]

@@ -154,7 +154,7 @@ enum Cmd {
         per_conversation_mcp: Option<Vec<McpServerDefinition>>,
         reply: oneshot::Sender<Result<SessionId, String>>,
     },
-    LoadSession {
+    ResumeSession {
         session_id: SessionId,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -327,12 +327,14 @@ impl ClaudeHarness {
                                         cx.send_notification(CancelNotification::new(session_id));
                                     let _ = reply.send(Ok(()));
                                 }
-                                Cmd::LoadSession { session_id, reply } => {
+                                Cmd::ResumeSession { session_id, reply } => {
                                     let agent_def = agent_def_for_driver.read().await.clone();
                                     let mcp_servers =
                                         build_mcp_servers(&agent_def.mcp_servers, None);
-                                    let mut req =
-                                        LoadSessionRequest::new(session_id, cwd_for_driver.clone());
+                                    let mut req = ResumeSessionRequest::new(
+                                        session_id,
+                                        cwd_for_driver.clone(),
+                                    );
                                     if !mcp_servers.is_empty() {
                                         req = req.mcp_servers(mcp_servers);
                                     }
@@ -342,7 +344,7 @@ impl ClaudeHarness {
                                         }
                                         Err(e) => {
                                             let _ = reply
-                                                .send(Err(format!("session/load failed: {e}")));
+                                                .send(Err(format!("session/resume failed: {e}")));
                                         }
                                     }
                                 }
@@ -416,8 +418,10 @@ impl ClaudeHarness {
 
     /// Resume a previously-created conversation by its ACP session id.
     ///
-    /// Sends `session/load` to claude-agent-acp, which restores from its
-    /// own on-disk transcript under `$CLAUDE_CONFIG_DIR/projects/...`.
+    /// Sends `session/resume` to claude-agent-acp, which restores from its
+    /// own on-disk transcript under `$CLAUDE_CONFIG_DIR/projects/...`
+    /// **without** replaying historical session updates back to us
+    /// (`session/load` would; bridge already has those events persisted).
     /// Registers a fresh SSE stream on the EventBus and returns its
     /// receiver so the API layer can re-attach.
     pub async fn restore_conversation(
@@ -427,7 +431,7 @@ impl ClaudeHarness {
         let session_id = SessionId::new(conversation_id);
         let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
-            .send(Cmd::LoadSession {
+            .send(Cmd::ResumeSession {
                 session_id: session_id.clone(),
                 reply: reply_tx,
             })

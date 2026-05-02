@@ -104,25 +104,18 @@ impl EventBus {
         self.emitted.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Emit a replayed event (already persisted in DB). Skips DB persistence
-    /// but fans out to WS, SSE, and webhook HTTP delivery.
-    pub fn emit_replayed(&self, mut event: BridgeEvent) {
-        let _guard = self.emit_lock.lock().unwrap_or_else(|e| e.into_inner());
-
-        let seq = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        event.sequence_number = seq;
-
-        let _ = self.ws_tx.send(event.clone());
-
-        if let Some(sse_tx) = self.sse_streams.get(event.conversation_id.as_str()) {
-            let _ = sse_tx.try_send(event.clone());
-        }
-
+    /// Replay a persisted event into the webhook delivery queue only.
+    ///
+    /// Used at startup to retry pending webhook deliveries that were
+    /// in-flight when the previous bridge process exited. The event is
+    /// **not** re-stamped (its original `sequence_number` is preserved)
+    /// and is **not** fanned out to live SSE/WS subscribers — those
+    /// channels are for fresh-after-startup activity, not historical
+    /// catch-up.
+    pub fn emit_replayed(&self, event: BridgeEvent) {
         if let Some(ref webhook_tx) = self.webhook_tx {
             let _ = webhook_tx.send(event);
         }
-
-        self.emitted.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Register an SSE stream for a conversation. Returns the receiver end.

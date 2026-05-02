@@ -32,7 +32,11 @@ CTRL_KEY="test-control-plane-key"
 IMAGE_TAG="bridge-e2e:latest"
 CONTAINER_NAME="bridge-e2e"
 
+WEBHOOK_PID=""
 cleanup() {
+    if [[ -n "${WEBHOOK_PID}" ]]; then
+        kill "${WEBHOOK_PID}" >/dev/null 2>&1 || true
+    fi
     if [[ $KEEP -eq 1 ]]; then
         echo "→ keeping container ${CONTAINER_NAME} for inspection"
         return
@@ -50,10 +54,16 @@ build_image() {
 
 start_container() {
     local permission_mode="$1"
+    local webhook_url="${2:-}"
     echo "→ removing any stale container"
     docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
-    echo "→ starting container (permission_mode=${permission_mode})"
+    local webhook_arg=""
+    if [[ -n "${webhook_url}" ]]; then
+        webhook_arg="-e BRIDGE_WEBHOOK_URL=${webhook_url}"
+    fi
+
+    echo "→ starting container (permission_mode=${permission_mode}${webhook_url:+ webhook=${webhook_url}})"
     docker run -d --name "${CONTAINER_NAME}" \
         -p 8080:8080 \
         -e ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL}" \
@@ -62,6 +72,7 @@ start_container() {
         -e ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_MODEL}" \
         -e ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_MODEL}" \
         -e ANTHROPIC_DEFAULT_HAIKU_MODEL="${ANTHROPIC_MODEL}" \
+        ${webhook_arg} \
         "${IMAGE_TAG}" >/dev/null
 
     echo "→ waiting for /health"
@@ -394,14 +405,137 @@ stop_subscriber
 echo
 assert_event "event: content_delta" "Phase 5b: post-restart content_delta"
 assert_event "event: turn_completed" "Phase 5b: post-restart turn_completed"
-if grep -q "PURPLE_LLAMA_42" "${EVENTS_FILE}"; then
+RECALLED=$(python3 -c "
+import json
+buf = []
+for line in open('${EVENTS_FILE}'):
+    line = line.strip()
+    if not line.startswith('data: '): continue
+    try:
+        ev = json.loads(line[6:])
+    except Exception:
+        continue
+    if ev.get('event_type') in ('response_chunk', 'reasoning_delta'):
+        c = ev.get('data', {}).get('content', {})
+        if isinstance(c, dict) and c.get('type') == 'text':
+            buf.append(c.get('text', ''))
+print(''.join(buf))
+")
+if echo "${RECALLED}" | grep -q "PURPLE_LLAMA_42"; then
     echo "  ✓ Phase 5b: response references the pre-restart token (PURPLE_LLAMA_42)"
 else
     echo "  ✗ MISSING: Phase 5b: response should mention PURPLE_LLAMA_42" >&2
+    echo "  reconstructed: ${RECALLED}" >&2
     dump_events "phase5b-fail"
     docker logs "${CONTAINER_NAME}" 2>&1 | tail -50 >&2
     exit 1
 fi
 
+
+# ──────────────────────────────────────────
+# Phase 6: webhook delivery — no events lost
+# Spin up a tiny HTTP receiver on the host that captures every POSTed
+# BridgeEvent into a JSONL file. Run a 2-turn conversation. Assert:
+#   - the captured stream has every event the SSE channel saw
+#   - sequence_numbers are monotonic with no gaps (1..N)
+#   - terminal events (turn_completed) appear for both turns
+# ──────────────────────────────────────────
 echo
-echo "✓✓✓ E2E PASSED (Phases 1, 2, 3, 4, 5) ✓✓✓"
+echo "═══ Phase 6: webhook delivery — no events lost ═══"
+
+WEBHOOK_PORT=9099
+WEBHOOK_OUT=$(mktemp -t bridge_webhook.XXXXXX)
+mv "${WEBHOOK_OUT}" "${WEBHOOK_OUT}.jsonl"
+WEBHOOK_OUT="${WEBHOOK_OUT}.jsonl"
+echo "→ starting webhook receiver on :${WEBHOOK_PORT} → ${WEBHOOK_OUT}"
+python3 scripts/webhook_receiver.py "${WEBHOOK_PORT}" "${WEBHOOK_OUT}" >/dev/null 2>&1 &
+WEBHOOK_PID=$!
+sleep 1
+
+docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+# host.docker.internal resolves the host on Docker Desktop / orbstack.
+start_container "bypassPermissions" "http://host.docker.internal:${WEBHOOK_PORT}/"
+push_agent "bypassPermissions"
+
+create_conversation
+start_sse_subscriber
+send_message "Reply with the single word: PING."
+wait_for_terminal_event 60
+echo "→ second turn (same SSE subscriber)"
+send_message "Reply with the single word: PONG."
+# Wait for the SECOND turn_completed by counting occurrences in the file.
+echo "→ waiting for second turn_completed (up to 60s)"
+TURN_DEADLINE=$((SECONDS + 60))
+while (( SECONDS < TURN_DEADLINE )); do
+    n=$(grep -c "event: turn_completed" "${EVENTS_FILE}" 2>/dev/null || true)
+    if [[ "${n}" -ge 2 ]]; then
+        echo "  saw 2 turn_completed events"
+        break
+    fi
+    sleep 1
+done
+stop_subscriber
+
+# Give the webhook worker a moment to flush its in-flight batch.
+sleep 3
+
+# Assertions ────────────────────────────────────────────────
+WEBHOOK_COUNT=$(wc -l < "${WEBHOOK_OUT}" | tr -d ' ')
+echo "  webhook events received: ${WEBHOOK_COUNT}"
+if [[ "${WEBHOOK_COUNT}" == "0" ]]; then
+    echo "  ✗ MISSING: no webhook deliveries received" >&2
+    docker logs "${CONTAINER_NAME}" 2>&1 | tail -50 >&2
+    exit 1
+fi
+echo "  ✓ Phase 6: webhook receiver got ${WEBHOOK_COUNT} events"
+
+# Sequence-number gap check.
+GAP_CHECK=$(python3 -c "
+import json, sys
+seqs = []
+for line in open('${WEBHOOK_OUT}'):
+    line = line.strip()
+    if not line: continue
+    try:
+        ev = json.loads(line)
+        seqs.append(int(ev['sequence_number']))
+    except Exception as e:
+        print('parse_error:', e, file=sys.stderr); sys.exit(1)
+seqs.sort()
+if seqs[0] != 1:
+    print(f'gap_at_start: first seq is {seqs[0]} not 1'); sys.exit(1)
+gaps = [(a, b) for a, b in zip(seqs, seqs[1:]) if b - a > 1]
+if gaps:
+    print(f'gaps: {gaps[:5]}'); sys.exit(1)
+print(f'monotonic 1..{seqs[-1]}, count={len(seqs)}')
+")
+if [[ $? -ne 0 ]]; then
+    echo "  ✗ MISSING: ${GAP_CHECK}" >&2
+    head -5 "${WEBHOOK_OUT}" >&2
+    exit 1
+fi
+echo "  ✓ Phase 6: sequence numbers are ${GAP_CHECK}"
+
+# Terminal-event check.
+TURN_COUNT=$(grep -c '"event_type": "turn_completed"' "${WEBHOOK_OUT}" || true)
+if [[ "${TURN_COUNT}" -lt 2 ]]; then
+    echo "  ✗ MISSING: expected ≥2 turn_completed events, got ${TURN_COUNT}" >&2
+    exit 1
+fi
+echo "  ✓ Phase 6: ${TURN_COUNT} turn_completed events captured"
+
+# Conversation-lifecycle event check.
+for required in conversation_created message_received response_chunk turn_completed; do
+    if grep -q "\"event_type\": \"${required}\"" "${WEBHOOK_OUT}"; then
+        echo "  ✓ Phase 6: webhook saw ${required}"
+    else
+        echo "  ✗ MISSING: webhook never received ${required}" >&2
+        exit 1
+    fi
+done
+
+kill "${WEBHOOK_PID}" >/dev/null 2>&1 || true
+WEBHOOK_PID=""
+
+echo
+echo "✓✓✓ E2E PASSED (Phases 1, 2, 3, 4, 5, 6) ✓✓✓"
