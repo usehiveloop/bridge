@@ -7,6 +7,7 @@ members = [
     "crates/webhooks",
     "crates/bridge",
     "crates/storage",
+    "crates/harness",
     "e2e/mock-control-plane",
     "e2e/storage-e2e",
 ]
@@ -85,6 +86,7 @@ runtime = { path = "crates/runtime" }
 api = { path = "crates/api" }
 webhooks = { path = "crates/webhooks" }
 storage = { path = "crates/storage" }
+harness = { path = "crates/harness" }
 
 # WebSocket client (for e2e tests)
 tokio-tungstenite = { version = "0.26", features = ["connect"] }

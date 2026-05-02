@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 bridge_core = { workspace = true }
+harness = { workspace = true }
 webhooks = { workspace = true }
 storage = { workspace = true }
 dashmap = { workspace = true }
