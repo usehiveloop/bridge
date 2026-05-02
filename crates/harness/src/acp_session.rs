@@ -1,12 +1,13 @@
-//! Claude Code adapter — wraps `@agentclientprotocol/claude-agent-acp`.
+//! Shared ACP-protocol driver used by every per-harness adapter.
 //!
-//! Spawns the Node binary as a child process, drives it over ACP stdio,
-//! and translates `SessionNotification`s into `BridgeEvent`s on the per-
-//! conversation SSE channels.
+//! Holds a single long-running connection to the spawned ACP-agent
+//! subprocess (claude-agent-acp, opencode acp, ...) and serializes
+//! commands from the supervisor onto it. The protocol layer is fully
+//! harness-agnostic; per-harness behaviour is supplied via the
+//! [`HarnessAdapter`] trait — the builder for the `_meta` block on
+//! `NewSessionRequest` and any human-readable harness name used in logs.
 
 use crate::events;
-use crate::settings;
-use crate::skills;
 use agent_client_protocol::schema::{
     CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest,
     PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
@@ -20,9 +21,8 @@ use bridge_core::{AgentDefinition, BridgeError};
 use dashmap::DashMap;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
-use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -36,111 +36,20 @@ pub struct ConversationContext {
     pub events: mpsc::Receiver<BridgeEvent>,
 }
 
-/// Options used to launch the Claude ACP agent process.
-pub struct ClaudeHarnessOptions {
-    pub command: String,
-    pub args: Vec<String>,
-    pub working_dir: PathBuf,
-    pub config_dir: PathBuf,
-    pub extra_env: Vec<(String, String)>,
-}
+/// Per-harness behaviour the shared driver delegates to.
+pub trait HarnessAdapter: Send + Sync + 'static {
+    /// Short name shown in logs (`"claude"`, `"opencode"`).
+    fn name(&self) -> &'static str;
 
-impl ClaudeHarnessOptions {
-    pub fn from_env() -> Self {
-        Self {
-            command: std::env::var("BRIDGE_CLAUDE_ACP_COMMAND")
-                .unwrap_or_else(|_| "claude-agent-acp".to_string()),
-            args: std::env::var("BRIDGE_CLAUDE_ACP_ARGS")
-                .ok()
-                .map(|s| s.split_whitespace().map(String::from).collect())
-                .unwrap_or_default(),
-            working_dir: std::env::var("BRIDGE_WORKING_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))),
-            config_dir: std::env::var("CLAUDE_CONFIG_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/tmp/claude-state")),
-            extra_env: Vec::new(),
-        }
-    }
-}
-
-/// Spawn the Claude ACP harness, run init, and return a handle the
-/// supervisor can dispatch into.
-pub async fn spawn_claude_harness(
-    agent: AgentDefinition,
-    opts: ClaudeHarnessOptions,
-    event_bus: Arc<EventBus>,
-    permission_manager: Arc<PermissionManager>,
-) -> Result<Arc<ClaudeHarness>, BridgeError> {
-    settings::write_settings(&opts.config_dir, &agent);
-    if !agent.skills.is_empty() {
-        skills::write_skills(&opts.config_dir, &agent.skills);
-    }
-
-    let mut cmd = Command::new(&opts.command);
-    cmd.args(&opts.args);
-    cmd.current_dir(&opts.working_dir);
-    for (k, v) in &opts.extra_env {
-        cmd.env(k, v);
-    }
-    // claude-agent-acp downgrades bypassPermissions to default when running
-    // as root unless IS_SANDBOX=1 is set. Bridge processes typically run as
-    // root inside containers, so we opt the agent process into the sandbox
-    // bypass when (and only when) the agent's config asks for it.
-    if agent.config.permission_mode.as_deref() == Some("bypassPermissions") {
-        cmd.env("IS_SANDBOX", "1");
-    }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    info!(
-        command = %opts.command,
-        args = ?opts.args,
-        cwd = %opts.working_dir.display(),
-        "spawning claude-agent-acp"
-    );
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| BridgeError::HarnessError(format!("failed to spawn claude-agent-acp: {e}")))?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| BridgeError::HarnessError("claude-agent-acp stdin missing".into()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| BridgeError::HarnessError("claude-agent-acp stdout missing".into()))?;
-    let stderr = child.stderr.take();
-
-    if let Some(stderr) = stderr {
-        tokio::spawn(pipe_stderr(stderr));
-    }
-
-    let inner = Arc::new(
-        ClaudeHarness::start(
-            agent,
-            opts.working_dir.clone(),
-            stdin,
-            stdout,
-            child,
-            event_bus,
-            permission_manager,
-        )
-        .await?,
-    );
-
-    Ok(inner)
-}
-
-async fn pipe_stderr(stderr: tokio::process::ChildStderr) {
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        info!(target: "claude_acp", "{}", line);
-    }
+    /// Build the `_meta` block to attach to `NewSessionRequest`. Each
+    /// harness uses its own key under `_meta` (e.g. claude-agent-acp
+    /// reads `_meta.claudeCode.options`). Return `None` to skip meta.
+    fn build_session_meta(
+        &self,
+        agent: &AgentDefinition,
+        api_key_override: Option<&str>,
+        provider_override: Option<&bridge_core::ProviderConfig>,
+    ) -> Option<serde_json::Map<String, Value>>;
 }
 
 struct SessionState {
@@ -169,10 +78,10 @@ enum Cmd {
     },
 }
 
-/// Thread-safe mutable view of the active agent definition.
 type AgentDefStore = Arc<RwLock<AgentDefinition>>;
 
-pub struct ClaudeHarness {
+/// Long-running ACP session pinned to one spawned agent process.
+pub struct AcpSession {
     agent_id: String,
     agent_def: AgentDefStore,
     cmd_tx: mpsc::Sender<Cmd>,
@@ -182,8 +91,10 @@ pub struct ClaudeHarness {
     _child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
 }
 
-impl ClaudeHarness {
-    async fn start(
+impl AcpSession {
+    /// Wire up the ACP connection over the given child stdio and start
+    /// the command dispatcher task.
+    pub async fn start(
         agent: AgentDefinition,
         cwd: PathBuf,
         stdin: ChildStdin,
@@ -191,7 +102,8 @@ impl ClaudeHarness {
         child: tokio::process::Child,
         event_bus: Arc<EventBus>,
         permission_manager: Arc<PermissionManager>,
-    ) -> Result<Self, BridgeError> {
+        adapter: Arc<dyn HarnessAdapter>,
+    ) -> Result<Arc<Self>, BridgeError> {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<Cmd>(64);
         let sessions: Arc<DashMap<String, SessionState>> = Arc::new(DashMap::new());
         let agent_id = agent.id.clone();
@@ -206,7 +118,9 @@ impl ClaudeHarness {
         let event_bus_for_perm = event_bus.clone();
         let event_bus_for_prompt = event_bus.clone();
         let agent_def_for_driver = agent_def.clone();
+        let adapter_for_driver = adapter.clone();
         let cwd_for_driver = cwd.clone();
+        let harness_name = adapter.name();
 
         let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
 
@@ -248,7 +162,7 @@ impl ClaudeHarness {
                         cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                             .block_task()
                             .await?;
-                        info!("ACP initialized");
+                        info!(harness = harness_name, "ACP initialized");
 
                         while let Some(cmd) = cmd_rx.recv().await {
                             match cmd {
@@ -267,10 +181,10 @@ impl ClaudeHarness {
                                     if !mcp_servers.is_empty() {
                                         req = req.mcp_servers(mcp_servers);
                                     }
-                                    if let Some(meta) = build_new_session_meta(
+                                    if let Some(meta) = adapter_for_driver.build_session_meta(
                                         &agent_def,
-                                        api_key_override,
-                                        provider_override,
+                                        api_key_override.as_deref(),
+                                        provider_override.as_ref(),
                                     ) {
                                         req = req.meta(meta);
                                     }
@@ -353,11 +267,11 @@ impl ClaudeHarness {
                 )
                 .await;
             if let Err(e) = result {
-                error!(error = %e, "ACP connection driver exited");
+                error!(harness = harness_name, error = %e, "ACP connection driver exited");
             }
         });
 
-        Ok(Self {
+        Ok(Arc::new(Self {
             agent_id,
             agent_def,
             cmd_tx,
@@ -365,7 +279,7 @@ impl ClaudeHarness {
             event_bus,
             _driver: driver,
             _child: Arc::new(tokio::sync::Mutex::new(child)),
-        })
+        }))
     }
 
     /// Update the active agent definition. Picked up on the next session creation.
@@ -394,9 +308,6 @@ impl ClaudeHarness {
             .map_err(|_| BridgeError::HarnessError("session creation cancelled".into()))?
             .map_err(BridgeError::HarnessError)?;
 
-        // Register an SSE stream on the EventBus. The bus stamps a global
-        // monotonic sequence_number on every event before fan-out, so the
-        // receiver we hand back already sees properly-ordered events.
         let sse_rx = self
             .event_bus
             .register_sse_stream(session_id.0.to_string(), 256);
@@ -414,16 +325,6 @@ impl ClaudeHarness {
         })
     }
 
-    /// Resume a previously-created conversation by its ACP session id.
-    ///
-    /// Sends `session/load` to claude-agent-acp, which restores from its
-    /// own on-disk transcript under `$CLAUDE_CONFIG_DIR/projects/...`.
-    /// `session/load` (vs `session/resume`) actually rebuilds the model's
-    /// internal state — `resume` was tested and the model could not recall
-    /// prior context. The history-replay session updates that load emits
-    /// fan into the EventBus normally; downstream channels handle the noise.
-    /// Registers a fresh SSE stream on the EventBus and returns its
-    /// receiver so the API layer can re-attach.
     pub async fn restore_conversation(
         &self,
         conversation_id: &str,
@@ -567,10 +468,6 @@ async fn handle_permission(
         .unwrap_or(Value::Null);
     let tool_call_id = req.tool_call.tool_call_id.0.to_string();
 
-    // PermissionManager.request_approval emits ToolApprovalRequired to the
-    // EventBus and blocks waiting for /approvals to resolve; resolve() then
-    // emits ToolApprovalResolved. Both events fan out to the SSE channel
-    // registered on the EventBus for this conversation.
     let result = perm
         .request_approval(
             agent_id,
@@ -638,73 +535,5 @@ fn translate_mcp(def: &McpServerDefinition) -> agent_client_protocol::schema::Mc
                 .collect();
             McpServer::Http(McpServerHttp::new(def.name.clone(), url.clone()).headers(header_vec))
         }
-    }
-}
-
-fn build_new_session_meta(
-    agent: &AgentDefinition,
-    api_key_override: Option<String>,
-    provider_override: Option<bridge_core::ProviderConfig>,
-) -> Option<serde_json::Map<String, Value>> {
-    let mut options = serde_json::Map::new();
-
-    if !agent.system_prompt.trim().is_empty() {
-        options.insert(
-            "systemPrompt".to_string(),
-            json!({ "append": agent.system_prompt }),
-        );
-    }
-
-    if !agent.config.allowed_tools.is_empty() {
-        options.insert(
-            "allowedTools".to_string(),
-            Value::Array(
-                agent
-                    .config
-                    .allowed_tools
-                    .iter()
-                    .map(|t| Value::String(t.clone()))
-                    .collect(),
-            ),
-        );
-    }
-    if !agent.config.disabled_tools.is_empty() {
-        options.insert(
-            "disallowedTools".to_string(),
-            Value::Array(
-                agent
-                    .config
-                    .disabled_tools
-                    .iter()
-                    .map(|t| Value::String(t.clone()))
-                    .collect(),
-            ),
-        );
-    }
-
-    if let Some(mode) = &agent.config.permission_mode {
-        options.insert("permissionMode".to_string(), json!(mode));
-    }
-    if let Some(model) = provider_override.as_ref().map(|p| p.model.clone()) {
-        options.insert("model".to_string(), json!(model));
-    }
-    if let Some(extra) = api_key_override {
-        let mut env_obj = options
-            .get("env")
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default();
-        env_obj.insert("ANTHROPIC_API_KEY".to_string(), json!(extra));
-        options.insert("env".to_string(), Value::Object(env_obj));
-    }
-
-    if options.is_empty() {
-        None
-    } else {
-        let mut meta = serde_json::Map::new();
-        meta.insert(
-            "claudeCode".to_string(),
-            json!({ "options": Value::Object(options) }),
-        );
-        Some(meta)
     }
 }

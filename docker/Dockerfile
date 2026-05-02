@@ -31,23 +31,27 @@ RUN apt-get update \
         ca-certificates curl tini \
     && rm -rf /var/lib/apt/lists/*
 
-# Install the ACP-Claude bridge agent globally. Its postinstall hydrates the
-# native `claude` binary as a platform-specific optional dep.
-RUN npm install -g @agentclientprotocol/claude-agent-acp@0.31.4 \
+# Install both ACP agents globally. Each ships its own native binary as
+# a platform-specific optional npm dep; bridge dispatches to one based
+# on the agent definition's `harness` field.
+RUN npm install -g \
+        @agentclientprotocol/claude-agent-acp@0.31.4 \
+        opencode-ai@1.14.32 \
     && npm cache clean --force
 
 # Sandbox-style isolation: every $HOME write stays under /work.
 ENV HOME=/work \
     CLAUDE_CONFIG_DIR=/work/.claude \
+    OPENCODE_CONFIG_DIR=/work/.opencode \
     TMPDIR=/work/tmp \
     NO_BROWSER=1 \
     BRIDGE_WORKING_DIR=/workspace \
     BRIDGE_STORAGE_PATH=/work/bridge.db \
     BRIDGE_LISTEN_ADDR=0.0.0.0:8080 \
     BRIDGE_CONTROL_PLANE_API_KEY=test-control-plane-key \
-    BRIDGE_LOG_LEVEL=info,claude_acp=info,harness=debug,runtime=debug
+    BRIDGE_LOG_LEVEL=info,claude_acp=info,opencode_acp=info,harness=debug,runtime=debug
 
-RUN mkdir -p /work/.claude /work/tmp /workspace
+RUN mkdir -p /work/.claude /work/.opencode /work/tmp /workspace
 
 WORKDIR /work
 

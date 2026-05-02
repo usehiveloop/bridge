@@ -8,7 +8,7 @@ use bridge_core::event::BridgeEvent;
 use bridge_core::mcp::McpServerDefinition;
 use bridge_core::metrics::MetricsSnapshot;
 use bridge_core::{AgentDefinition, AgentSummary, BridgeError, RuntimeConfig};
-use harness::claude::{spawn_claude_harness, ClaudeHarness, ClaudeHarnessOptions};
+use harness::AcpSession;
 use std::sync::Arc;
 use storage::{StorageBackend, StorageHandle};
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -36,7 +36,7 @@ pub struct AgentSupervisor {
 
 struct HarnessSlot {
     agent_id: String,
-    claude: Arc<ClaudeHarness>,
+    session: Arc<AcpSession>,
 }
 
 impl AgentSupervisor {
@@ -124,7 +124,7 @@ impl AgentSupervisor {
             let mut slot = self.harness.write().await;
             if slot.as_ref().is_some_and(|s| s.agent_id == id) {
                 if let Some(s) = slot.as_ref() {
-                    s.claude.shutdown().await;
+                    s.session.shutdown().await;
                 }
                 *slot = None;
             }
@@ -164,7 +164,7 @@ impl AgentSupervisor {
             storage.save_agent(updated.clone());
         }
         if let Some(slot) = self.harness.read().await.as_ref() {
-            slot.claude.set_definition(updated).await;
+            slot.session.set_definition(updated).await;
         }
         Ok(())
     }
@@ -186,7 +186,7 @@ impl AgentSupervisor {
             return Err(BridgeError::AgentNotFound(agent_id.to_string()));
         }
         let ctx = slot
-            .claude
+            .session
             .create_conversation(api_key_override, provider_override, per_conversation_mcp)
             .await?;
 
@@ -224,7 +224,7 @@ impl AgentSupervisor {
     ) -> Result<(), BridgeError> {
         let slot = self.harness.read().await;
         let slot = slot.as_ref().ok_or(BridgeError::HarnessUnavailable)?;
-        slot.claude
+        slot.session
             .send_message(conv_id, content, system_reminder)
             .await
     }
@@ -236,14 +236,14 @@ impl AgentSupervisor {
         if let Some(storage) = &self.storage {
             storage.delete_conversation(conv_id.to_string());
         }
-        let claude_opt = self
+        let session_opt = self
             .harness
             .try_read()
             .ok()
-            .and_then(|s| s.as_ref().map(|x| x.claude.clone()));
-        if let Some(claude) = claude_opt {
+            .and_then(|s| s.as_ref().map(|x| x.session.clone()));
+        if let Some(session) = session_opt {
             let conv_id = conv_id.to_string();
-            tokio::spawn(async move { claude.end(&conv_id).await });
+            tokio::spawn(async move { session.end(&conv_id).await });
         }
         Ok(())
     }
@@ -255,7 +255,7 @@ impl AgentSupervisor {
     ) -> Result<(), BridgeError> {
         let slot = self.harness.read().await;
         let slot = slot.as_ref().ok_or(BridgeError::HarnessUnavailable)?;
-        slot.claude.abort(conv_id).await
+        slot.session.abort(conv_id).await
     }
 
     pub async fn hydrate_conversations(
@@ -282,7 +282,7 @@ impl AgentSupervisor {
         if slot.agent_id != agent_id {
             return Err(BridgeError::AgentNotFound(agent_id.to_string()));
         }
-        let ctx = slot.claude.restore_conversation(conv_id).await?;
+        let ctx = slot.session.restore_conversation(conv_id).await?;
         if let Some(agent) = self.agent_map.get(agent_id) {
             agent.conversations.insert(
                 ctx.conversation_id.clone(),
@@ -302,7 +302,7 @@ impl AgentSupervisor {
     pub async fn shutdown(&self) {
         let mut slot = self.harness.write().await;
         if let Some(s) = slot.take() {
-            s.claude.shutdown().await;
+            s.session.shutdown().await;
         }
         self.cancel.cancel();
         info!("supervisor shutdown");
@@ -337,10 +337,10 @@ impl AgentSupervisor {
         let mut slot = self.harness.write().await;
         if let Some(existing_slot) = slot.as_ref() {
             if existing_slot.agent_id == id {
-                existing_slot.claude.set_definition(def.clone()).await;
+                existing_slot.session.set_definition(def.clone()).await;
                 return Ok(());
             }
-            existing_slot.claude.shutdown().await;
+            existing_slot.session.shutdown().await;
             *slot = None;
         }
 
@@ -350,12 +350,11 @@ impl AgentSupervisor {
             .ok_or_else(|| BridgeError::Internal("event_bus not configured".into()))?;
         let permission_manager = self.permission_manager.clone();
 
-        let opts = ClaudeHarnessOptions::from_env();
-        let claude = spawn_claude_harness(def, opts, event_bus, permission_manager).await?;
+        let session = harness::spawn(def, event_bus, permission_manager).await?;
 
         *slot = Some(HarnessSlot {
             agent_id: id,
-            claude,
+            session,
         });
         Ok(())
     }
