@@ -110,8 +110,9 @@ async fn build_agent_response(
         .subagents
         .iter()
         .map(|sa| {
-            // Look up registered tools from the runtime subagent entry
-            let registered_tools = agent
+            // Registered-tool enumeration is owned by the harness adapter
+            // when it is wired up. For now subagents report no tools.
+            let registered_tools: Vec<RegisteredToolSummary> = agent
                 .subagents
                 .get(&sa.name)
                 .map(|entry| {
@@ -147,16 +148,9 @@ async fn build_agent_response(
 
     let metrics = agent.metrics.snapshot(&def.id, &def.name);
 
-    let mut registered_tools: Vec<RegisteredToolSummary> = agent
-        .tool_registry
-        .list()
-        .into_iter()
-        .map(|(name, description)| RegisteredToolSummary {
-            name: name.to_string(),
-            description: description.to_string(),
-        })
-        .collect();
-    registered_tools.sort_by(|a, b| a.name.cmp(&b.name));
+    // Tool registration is owned by the harness adapter once wired. Until
+    // then, this list is empty.
+    let registered_tools: Vec<RegisteredToolSummary> = Vec::new();
 
     AgentResponse {
         id: def.id.clone(),

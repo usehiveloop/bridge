@@ -1,13 +1,12 @@
 use bridge_core::event::BridgeEvent;
 use dashmap::DashMap;
-use llm::PermissionManager;
 use runtime::AgentSupervisor;
 use std::sync::Arc;
 use storage::StorageBackend;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use webhooks::EventBus;
+use webhooks::{EventBus, PermissionManager};
 
 /// Shared application state for all request handlers.
 #[derive(Clone)]

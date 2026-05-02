@@ -99,10 +99,12 @@ pub async fn send_message(
     let (final_content, attachment_path_str) = if let Some(full) = &body.full_message {
         match crate::attachments::write_full_message(&conv_id, full).await {
             Some(path) => {
-                let tools = state
+                let tools: std::collections::HashSet<String> = state
                     .supervisor
                     .agent_tool_names(&agent_id)
-                    .unwrap_or_default();
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
                 let composed =
                     crate::attachments::compose_with_attachment(&body.content, full, &path, &tools);
                 (composed, Some(path.display().to_string()))
