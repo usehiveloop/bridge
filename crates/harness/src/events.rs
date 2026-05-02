@@ -69,7 +69,8 @@ pub fn map_update(
         SessionUpdate::AvailableCommandsUpdate(_)
         | SessionUpdate::CurrentModeUpdate(_)
         | SessionUpdate::ConfigOptionUpdate(_)
-        | SessionUpdate::SessionInfoUpdate(_) => Vec::new(),
+        | SessionUpdate::SessionInfoUpdate(_)
+        | SessionUpdate::UsageUpdate(_) => Vec::new(),
         // Future variants (`#[non_exhaustive]`).
         _ => Vec::new(),
     }

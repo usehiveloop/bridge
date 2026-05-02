@@ -5,7 +5,7 @@
 #   stage 2: runtime image with Node + claude-agent-acp + the bridge binary
 
 # ─── stage 1: build ─────────────────────────────────────────────
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.90-bookworm AS builder
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -41,7 +41,6 @@ ENV HOME=/work \
     CLAUDE_CONFIG_DIR=/work/.claude \
     TMPDIR=/work/tmp \
     NO_BROWSER=1 \
-    IS_SANDBOX=1 \
     BRIDGE_WORKING_DIR=/workspace \
     BRIDGE_STORAGE_PATH=/work/bridge.db \
     BRIDGE_LISTEN_ADDR=0.0.0.0:8080 \

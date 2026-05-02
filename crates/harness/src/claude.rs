@@ -5,6 +5,7 @@
 //! conversation SSE channels.
 
 use crate::events;
+use crate::settings;
 use crate::skills;
 use agent_client_protocol::schema::{
     CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
@@ -71,6 +72,7 @@ pub async fn spawn_claude_harness(
     event_bus: Arc<EventBus>,
     permission_manager: Arc<PermissionManager>,
 ) -> Result<Arc<ClaudeHarness>, BridgeError> {
+    settings::write_settings(&opts.config_dir, &agent);
     if !agent.skills.is_empty() {
         skills::write_skills(&opts.config_dir, &agent.skills);
     }
@@ -186,10 +188,13 @@ impl ClaudeHarness {
 
         let agent_id_for_notif = agent_id.clone();
         let agent_id_for_perm = agent_id.clone();
+        let agent_id_for_prompt = agent_id.clone();
         let sessions_for_notif = sessions.clone();
         let sessions_for_perm = sessions.clone();
+        let sessions_for_prompt = sessions.clone();
         let event_bus_for_notif = event_bus.clone();
         let event_bus_for_perm = event_bus.clone();
+        let event_bus_for_prompt = event_bus.clone();
         let agent_def_for_driver = agent_def.clone();
         let cwd_for_driver = cwd.clone();
 
@@ -275,13 +280,43 @@ impl ClaudeHarness {
                                     reply,
                                 } => {
                                     let req = PromptRequest::new(
-                                        session_id,
+                                        session_id.clone(),
                                         vec![ContentBlock::Text(TextContent::new(text))],
                                     );
                                     let send = cx.send_request(req);
+                                    let agent_id = agent_id_for_prompt.clone();
+                                    let event_bus = event_bus_for_prompt.clone();
+                                    let sessions = sessions_for_prompt.clone();
+                                    let conv_id = session_id.0.to_string();
                                     tokio::spawn(async move {
-                                        if let Err(e) = send.block_task().await {
-                                            warn!(error = %e, "prompt failed");
+                                        match send.block_task().await {
+                                            Ok(resp) => {
+                                                let stop = format!("{:?}", resp.stop_reason)
+                                                    .to_ascii_lowercase();
+                                                let ev = BridgeEvent::new(
+                                                    BridgeEventType::TurnCompleted,
+                                                    &agent_id,
+                                                    &conv_id,
+                                                    json!({ "stop_reason": stop }),
+                                                );
+                                                event_bus.emit(ev.clone());
+                                                if let Some(state) = sessions.get(&conv_id) {
+                                                    let _ = state.sse_tx.send(ev).await;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!(error = %e, "prompt failed");
+                                                let ev = BridgeEvent::new(
+                                                    BridgeEventType::AgentError,
+                                                    &agent_id,
+                                                    &conv_id,
+                                                    json!({ "error": e.to_string() }),
+                                                );
+                                                event_bus.emit(ev.clone());
+                                                if let Some(state) = sessions.get(&conv_id) {
+                                                    let _ = state.sse_tx.send(ev).await;
+                                                }
+                                            }
                                         }
                                     });
                                     let _ = reply.send(Ok(()));
@@ -499,17 +534,41 @@ async fn handle_permission(
         )
         .await;
 
-    let outcome = match result {
-        Ok((bridge_core::ApprovalDecision::Approve, _)) => match allow_id {
-            Some(id) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
-            None => RequestPermissionOutcome::Cancelled,
+    let (outcome, decision_str) = match &result {
+        Ok((bridge_core::ApprovalDecision::Approve, _)) => match &allow_id {
+            Some(id) => (
+                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id.clone())),
+                "approve",
+            ),
+            None => (RequestPermissionOutcome::Cancelled, "cancelled"),
         },
-        Ok((bridge_core::ApprovalDecision::Deny, _)) => match reject_id {
-            Some(id) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
-            None => RequestPermissionOutcome::Cancelled,
+        Ok((bridge_core::ApprovalDecision::Deny, _)) => match &reject_id {
+            Some(id) => (
+                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id.clone())),
+                "deny",
+            ),
+            None => (RequestPermissionOutcome::Cancelled, "cancelled"),
         },
-        Err(_) => RequestPermissionOutcome::Cancelled,
+        Err(_) => (RequestPermissionOutcome::Cancelled, "cancelled"),
     };
+
+    // Emit ToolApprovalResolved onto the per-session SSE channel.
+    // PermissionManager.resolve already emitted to the global event bus
+    // (webhooks, polling); the SSE stream needs its own copy.
+    if let Some(state) = sessions.get(&conv_id) {
+        let _ = state
+            .sse_tx
+            .send(BridgeEvent::new(
+                BridgeEventType::ToolApprovalResolved,
+                agent_id,
+                &conv_id,
+                json!({
+                    "tool_call_id": tool_call_id,
+                    "decision": decision_str,
+                }),
+            ))
+            .await;
+    }
 
     responder.respond(RequestPermissionResponse::new(outcome))
 }

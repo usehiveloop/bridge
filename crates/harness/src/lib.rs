@@ -7,6 +7,7 @@
 
 pub mod claude;
 pub mod events;
+pub mod settings;
 pub mod skills;
 
 pub use claude::{spawn_claude_harness, ClaudeHarness, ClaudeHarnessOptions, ConversationContext};
