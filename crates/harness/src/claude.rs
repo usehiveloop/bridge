@@ -83,6 +83,13 @@ pub async fn spawn_claude_harness(
     for (k, v) in &opts.extra_env {
         cmd.env(k, v);
     }
+    // claude-agent-acp downgrades bypassPermissions to default when running
+    // as root unless IS_SANDBOX=1 is set. Bridge processes typically run as
+    // root inside containers, so we opt the agent process into the sandbox
+    // bypass when (and only when) the agent's config asks for it.
+    if agent.config.permission_mode.as_deref() == Some("bypassPermissions") {
+        cmd.env("IS_SANDBOX", "1");
+    }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

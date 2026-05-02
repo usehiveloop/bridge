@@ -79,6 +79,7 @@ start_container() {
 
 push_agent() {
     local permission_mode="$1"
+    local mcp_servers_json="${2:-[]}"
     AGENT_ID="agent_test"
 
     echo "→ pushing agent (permission_mode=${permission_mode})"
@@ -89,13 +90,14 @@ push_agent() {
       "id": "${AGENT_ID}",
       "name": "Test Claude",
       "harness": "claude",
-      "system_prompt": "You are a helpful, terse assistant. Always answer in under 50 words.",
+      "system_prompt": "You are a helpful, terse assistant. Always answer in under 50 words. When the user asks you to remember or recall something, use the available memory tools (mcp__hiveloop__memory_retain, mcp__hiveloop__memory_recall, mcp__hiveloop__memory_retrieve) instead of relying on your own context.",
       "provider": {
         "provider_type": "anthropic",
         "model": "${ANTHROPIC_MODEL}",
         "api_key": "unused",
         "base_url": "${ANTHROPIC_BASE_URL}"
       },
+      "mcp_servers": ${mcp_servers_json},
       "config": {
         "permission_mode": "${permission_mode}"
       }
@@ -105,6 +107,11 @@ push_agent() {
 JSON
 )
 
+    if [[ -n "${BRIDGE_E2E_DEBUG:-}" ]]; then
+        echo "── PUSH BODY ──"
+        echo "${PUSH_BODY}"
+        echo "── /PUSH BODY ──"
+    fi
     PUSH_RESP=$(curl -sS -w "\n%{http_code}" \
         -X POST "${BRIDGE_BASE_URL}/push/agents" \
         -H "content-type: application/json" \
@@ -269,5 +276,64 @@ assert_event "event: tool_approval_resolved" "Phase 3: got tool_approval_resolve
 assert_event "event: tool_call_result" "Phase 3: got tool_call_result"
 assert_event "event: turn_completed" "Phase 3: got turn_completed"
 
+
+# ──────────────────────────────────────────
+# Phase 4: custom MCP server (hiveloop memory tools)
+# Restart container with bypassPermissions so MCP tools just run; assert
+# the agent invokes the named MCP tools across two separate conversations.
+# ──────────────────────────────────────────
 echo
-echo "✓✓✓ E2E PASSED (Phases 1, 2, 3) ✓✓✓"
+echo "═══ Phase 4: custom MCP (hiveloop memory) ═══"
+docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+start_container "bypassPermissions"
+
+HIVELOOP_MCP=$(cat <<'JSON'
+[
+  {
+    "name": "hiveloop",
+    "transport": {
+      "type": "streamable_http",
+      "url": "https://mcp.usehiveloop.com/292b4d0a-0f4f-47fe-b7a4-cb479b465c92",
+      "headers": {
+        "Authorization": "Bearer ***REMOVED***"
+      }
+    }
+  }
+]
+JSON
+)
+push_agent "bypassPermissions" "${HIVELOOP_MCP}"
+
+# Phase 4a — retain
+echo "── 4a: retain a fact ──"
+create_conversation
+start_sse_subscriber
+send_message "Use the memory_retain tool to save this fact: my favorite color is purple."
+wait_for_terminal_event 45
+stop_subscriber
+echo
+assert_event "memory_retain" "Phase 4a: tool_call mentions memory_retain"
+assert_event "event: tool_call_result" "Phase 4a: got tool_call_result"
+assert_event "event: turn_completed" "Phase 4a: got turn_completed"
+
+# Phase 4b — recall (in a fresh conversation so the model can't cheat from context)
+echo "── 4b: recall the fact ──"
+create_conversation
+start_sse_subscriber
+send_message "What is my favorite color? Use the memory_recall or memory_retrieve tool to look it up."
+wait_for_terminal_event 45
+stop_subscriber
+echo
+if grep -q "memory_recall\|memory_retrieve" "${EVENTS_FILE}"; then
+    echo "  ✓ Phase 4b: tool_call mentions memory_recall or memory_retrieve"
+else
+    echo "  ✗ MISSING: Phase 4b: memory_recall/retrieve" >&2
+    dump_events "phase4b-fail"
+    docker logs "${CONTAINER_NAME}" 2>&1 | tail -50 >&2
+    exit 1
+fi
+assert_event "event: tool_call_result" "Phase 4b: got tool_call_result"
+assert_event "event: turn_completed" "Phase 4b: got turn_completed"
+
+echo
+echo "✓✓✓ E2E PASSED (Phases 1, 2, 3, 4) ✓✓✓"
