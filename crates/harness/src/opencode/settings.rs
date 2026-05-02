@@ -68,10 +68,32 @@ pub fn write_config(
     }
 
     // Pass an explicit provider entry when the caller supplied a base URL
-    // override (e.g. routing to a custom Anthropic-shaped proxy). opencode
-    // forwards `options` straight to the AI SDK call.
-    if agent.provider.base_url.is_some() {
+    // override or runs through opencode's built-in providers but needs an
+    // api key threaded in. For ProviderType::Custom we wire the openai-
+    // compatible AI SDK and register the model in the provider's `models`
+    // map so opencode's strict provider/model validation accepts it.
+    if agent.provider.base_url.is_some() || matches!(
+        agent.provider.provider_type,
+        bridge_core::provider::ProviderType::Custom
+    ) {
         let mut provider_block = Map::new();
+        let mut entry = Map::new();
+        let is_custom = matches!(
+            agent.provider.provider_type,
+            bridge_core::provider::ProviderType::Custom
+        );
+        if is_custom {
+            entry.insert("npm".to_string(), json!("@ai-sdk/openai-compatible"));
+            entry.insert("name".to_string(), json!(provider_id));
+            // opencode rejects a `model` reference whose model id isn't
+            // listed under the provider's `models` map. Register the bare
+            // model id with empty overrides so opencode treats it as
+            // available. Callers can extend this later.
+            let mut models = Map::new();
+            let bare = strip_provider_prefix(&model_id);
+            models.insert(bare.to_string(), json!({}));
+            entry.insert("models".to_string(), Value::Object(models));
+        }
         let mut options = Map::new();
         if let Some(base) = &agent.provider.base_url {
             options.insert("baseURL".to_string(), json!(base));
@@ -79,10 +101,10 @@ pub fn write_config(
         if !agent.provider.api_key.is_empty() {
             options.insert("apiKey".to_string(), json!(agent.provider.api_key));
         }
-        provider_block.insert(
-            provider_id.to_string(),
-            json!({ "options": Value::Object(options) }),
-        );
+        if !options.is_empty() {
+            entry.insert("options".to_string(), Value::Object(options));
+        }
+        provider_block.insert(provider_id.to_string(), Value::Object(entry));
         root.insert("provider".to_string(), Value::Object(provider_block));
     }
 
@@ -181,6 +203,10 @@ fn build_permission_block(agent: &AgentDefinition) -> Option<Value> {
     } else {
         Some(Value::Object(perm))
     }
+}
+
+fn strip_provider_prefix(model_id: &str) -> &str {
+    model_id.split_once('/').map(|(_, m)| m).unwrap_or(model_id)
 }
 
 fn provider_to_opencode(p: &bridge_core::provider::ProviderType) -> &'static str {

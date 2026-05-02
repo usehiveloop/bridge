@@ -215,7 +215,7 @@ echo "═══ Phase 1: simple Q&A ═══"
 create_conversation
 start_sse_subscriber
 send_message "What is 2+2? Reply with just the number."
-wait_for_terminal_event 60
+wait_for_terminal_event 30
 stop_subscriber
 echo
 assert_event "event: content_delta" "Phase 1: got content_delta (response_chunk)"
@@ -229,7 +229,7 @@ echo "═══ Phase 2: tool call ═══"
 create_conversation
 start_sse_subscriber
 send_message "Use the bash tool right now. Execute exactly this command: echo HELLO_FROM_BRIDGE. After running it, tell me the exact output."
-wait_for_terminal_event 60
+wait_for_terminal_event 45
 stop_subscriber
 echo
 assert_event "event: tool_call_start" "Phase 2: got tool_call_start"
@@ -315,7 +315,7 @@ echo "── 4a: retain a fact ──"
 create_conversation
 start_sse_subscriber
 send_message "Use the memory_retain tool to save this fact: my favorite color is purple."
-wait_for_terminal_event 60
+wait_for_terminal_event 45
 stop_subscriber
 echo
 assert_event "memory_retain" "Phase 4a: tool_call mentions memory_retain"
@@ -327,7 +327,7 @@ echo "── 4b: recall the fact ──"
 create_conversation
 start_sse_subscriber
 send_message "What is my favorite color? Use the memory_recall or memory_retrieve tool to look it up."
-wait_for_terminal_event 60
+wait_for_terminal_event 45
 stop_subscriber
 echo
 if grep -q "memory_recall\|memory_retrieve" "${EVENTS_FILE}"; then
@@ -386,7 +386,7 @@ curl -sN "${BRIDGE_BASE_URL}/conversations/${CONV_ID}/stream" > "${EVENTS_FILE}"
 SSE_PID=$!
 sleep 1
 send_message "What was the token I asked you to remember? Reply with just the token."
-wait_for_terminal_event 60
+wait_for_terminal_event 45
 stop_subscriber
 echo
 assert_event "event: content_delta" "Phase 5b: post-restart content_delta"
