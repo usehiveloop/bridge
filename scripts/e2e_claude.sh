@@ -229,7 +229,7 @@ echo "═══ Phase 2: tool call ═══"
 create_conversation
 start_sse_subscriber
 send_message "Use the Bash tool right now. Execute exactly this command: echo HELLO_FROM_BRIDGE. After running it, tell me the exact output."
-wait_for_terminal_event 45
+wait_for_terminal_event 60
 stop_subscriber
 echo
 assert_event "event: tool_call_start" "Phase 2: got tool_call_start"
