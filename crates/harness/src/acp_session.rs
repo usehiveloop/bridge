@@ -99,6 +99,7 @@ pub struct AcpSession {
 impl AcpSession {
     /// Wire up the ACP connection over the given child stdio and start
     /// the command dispatcher task.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         agent: AgentDefinition,
         cwd: PathBuf,
@@ -360,8 +361,7 @@ impl AcpSession {
             .map_err(|_| BridgeError::HarnessError("session creation cancelled".into()))?
             .map_err(BridgeError::HarnessError)?;
 
-        self.event_bus
-            .register_sse_stream(session_id.0.to_string());
+        self.event_bus.register_sse_stream(session_id.0.to_string());
         self.sessions.insert(
             session_id.0.to_string(),
             SessionState {
@@ -393,8 +393,7 @@ impl AcpSession {
             .map_err(|_| BridgeError::HarnessError("session load cancelled".into()))?
             .map_err(BridgeError::HarnessError)?;
 
-        self.event_bus
-            .register_sse_stream(session_id.0.to_string());
+        self.event_bus.register_sse_stream(session_id.0.to_string());
         self.sessions.insert(
             session_id.0.to_string(),
             SessionState {

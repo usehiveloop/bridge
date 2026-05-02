@@ -34,7 +34,9 @@ pub fn init_sentry() -> Option<sentry::ClientInitGuard> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("bridge@{}", env!("CARGO_PKG_VERSION")));
 
-    let server_name = std::env::var("BRIDGE_INSTANCE_ID").ok().filter(|s| !s.is_empty());
+    let server_name = std::env::var("BRIDGE_INSTANCE_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     let debug = std::env::var("SENTRY_DEBUG")
         .ok()
